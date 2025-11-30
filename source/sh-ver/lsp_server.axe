@@ -1,0 +1,352 @@
+// Axe LSP Implementation
+//
+// Author: Navid Momtahen (C) 2025
+// License: GPL-3.0
+
+use std.io (
+    println,
+    print
+);
+
+use std.string (
+    string,
+    str,
+    concat,
+    str_len,
+    equals_c,
+    strip,
+    has_prefix,
+    i32_to_string,
+    str_to_int
+);
+
+use std.os (
+    quit
+);
+
+use std.json;
+use std.maps (
+    StringHashMapString
+);
+
+use std.arena (
+    Arena
+);
+
+// Document storage
+mut g_arena: Arena;
+mut g_documents: StringHashMapString;
+
+/// Initialize global state
+def init_lsp() {
+    g_arena = Arena.create(1024 * 1024 * 10);
+    g_documents = deref(StringHashMapString.create(ref_of(g_arena), 128));
+}
+
+/// Read Content-Length header and message from stdin
+def read_message(): string {
+    mut content_length: i32 = 0;
+    mut buffer: char[8192];
+    
+    loop {
+        mut i: i32 = 0;
+        mut ch: char = '\0';
+        
+        loop {
+            unsafe {
+                val c: i32 = C.getchar();
+                if c == -1 {
+                    return std__string__str("");
+                }
+                ch = c;
+            }
+            
+            if ch == '\n' {
+                break;
+            }
+            if ch != '\r' and i < 8190 {
+                buffer[i] = ch;
+                i = i + 1;
+            }
+        }
+        
+        buffer[i] = '\0';
+        
+        if i == 0 {
+            break;
+        }
+        
+        mut line: string = str(buffer);
+        
+        if has_prefix(line, str("Content-Length:")) {
+            mut j: i32 = 15;
+            loop {
+                if j >= i {
+                    break;
+                }
+                if buffer[j] != ' ' and buffer[j] != '\t' {
+                    break;
+                }
+                j = j + 1;
+            }
+            content_length = str_to_int(str(addr_of(buffer[j])));
+        }
+    }
+    
+    if content_length == 0 or content_length > 8000 {
+        return str("");
+    }
+    
+    mut msg_buffer: char[8192];
+    mut bytes_read: i32 = 0;
+    
+    loop {
+        if bytes_read >= content_length {
+            break;
+        }
+        
+        unsafe {
+            val c: i32 = C.getchar();
+            if c == -1 {
+                break;
+            }
+            msg_buffer[bytes_read] = c;
+        }
+        
+        bytes_read = bytes_read + 1;
+    }
+    
+    msg_buffer[bytes_read] = '\0';
+    return str(msg_buffer);
+}
+
+/// Send a JSON-RPC response
+def send_response(id: i32, result: string) {
+    mut response: string = str("{\"jsonrpc\":\"2.0\",\"id\":");
+    response = concat(response, i32_to_string(id));
+    response = concat(response, str(",\"result\":"));
+    response = concat(response, result);
+    response = concat(response, str("}"));
+    
+    send_message(response);
+}
+
+/// Send a JSON-RPC notification
+def send_notification(method: string, params: string) {
+    mut notification: string = str("{\"jsonrpc\":\"2.0\",\"method\":\"");
+    notification = concat(notification, method);
+    notification = concat(notification, str("\",\"params\":"));
+    notification = concat(notification, params);
+    notification = concat(notification, str("}"));
+    
+    send_message(notification);
+}
+
+/// Send a message with Content-Length header
+def send_message(content: string) {
+    mut length: i32 = str_len(content);
+    
+    print "Content-Length: ";
+    println length;
+    print "\r\n\r\n";
+    print content;
+}
+
+/// Handle initialize request
+def handle_initialize(id: i32, params: ref char): string {
+    mut result: string = str("{");
+    result = concat(result, str("\"capabilities\":{"));
+    result = concat(result, str("\"textDocumentSync\":1,"));
+    result = concat(result, str("\"hoverProvider\":true,"));
+    result = concat(result, str("\"completionProvider\":{\"triggerCharacters\":[\".\",\":\"]},"));
+    result = concat(result, str("\"definitionProvider\":true,"));
+    result = concat(result, str("\"diagnosticProvider\":{\"interFileDependencies\":false,\"workspaceDiagnostics\":false}"));
+    result = concat(result, str("},"));
+    result = concat(result, str("\"serverInfo\":{\"name\":\"axe-lsp\",\"version\":\"0.1.0\"}"));
+    result = concat(result, str("}"));
+    
+    send_response(id, result);
+    return str("initialized");
+}
+
+/// Handle textDocument/didOpen notification
+def handle_did_open(params: ref char) {
+    if params == nil {
+        return;
+    }
+    
+    mut text_doc: ref char = obj_get(params, str("textDocument"));
+    if text_doc == nil {
+        return;
+    }
+    
+    mut uri_obj: ref char = obj_get(text_doc, str("uri"));
+    mut text_obj: ref char = obj_get(text_doc, str("text"));
+    
+    if uri_obj != nil and text_obj != nil {
+        mut uri: string = get_str(uri_obj);
+        mut text: string = get_str(text_obj);
+        StringHashMapString.add(addr_of(g_documents), addr_of(g_arena), uri, text);
+    }
+}
+
+/// Handle textDocument/didChange notification
+def handle_did_change(params: ref char) {
+    if params == nil {
+        return;
+    }
+    
+    mut text_doc: ref char = obj_get(params, str("textDocument"));
+    if text_doc == nil {
+        return;
+    }
+    
+    mut uri_obj: ref char = obj_get(text_doc, str("uri"));
+    if uri_obj == nil {
+        return;
+    }
+    
+    mut uri: string = get_str(uri_obj);
+    
+    mut changes: ref char = obj_get(params, str("contentChanges"));
+    if changes != nil and is_array(changes) {
+        mut arr_size: usize = get_len(changes);
+        if arr_size > 0 {
+            mut change: ref char = arr_get(changes, 0);
+            if change != nil {
+                mut text_obj: ref char = obj_get(change, str("text"));
+                if text_obj != nil {
+                    mut text: string = get_str(text_obj);
+                    StringHashMapString.add(addr_of(g_documents), addr_of(g_arena), uri, text);
+                }
+            }
+        }
+    }
+}
+
+/// Handle textDocument/didClose notification
+def handle_did_close(params: ref char) {
+    if params == nil {
+        return;
+    }
+    
+    mut text_doc: ref char = obj_get(params, str("textDocument"));
+    if text_doc == nil {
+        return;
+    }
+    
+    mut uri_obj: ref char = obj_get(text_doc, str("uri"));
+    if uri_obj != nil {
+        mut uri: string = get_str(uri_obj);
+        StringHashMapString.pop(addr_of(g_documents), uri);
+    }
+}
+
+/// Handle textDocument/hover request
+def handle_hover(id: i32, params: ref char) {
+    // For now, return null (no hover info)
+    send_response(id, str("null"));
+}
+
+/// Handle textDocument/completion request
+def handle_completion(id: i32, params: ref char) {
+    mut result: string = str("{\"isIncomplete\":false,\"items\":[");
+    result = concat(result, str("{\"label\":\"def\",\"kind\":14},"));
+    result = concat(result, str("{\"label\":\"model\",\"kind\":14},"));
+    result = concat(result, str("{\"label\":\"enum\",\"kind\":14},"));
+    result = concat(result, str("{\"label\":\"use\",\"kind\":14},"));
+    result = concat(result, str("{\"label\":\"val\",\"kind\":14},"));
+    result = concat(result, str("{\"label\":\"mut\",\"kind\":14},"));
+    result = concat(result, str("{\"label\":\"if\",\"kind\":14},"));
+    result = concat(result, str("{\"label\":\"else\",\"kind\":14},"));
+    result = concat(result, str("{\"label\":\"elif\",\"kind\":14},"));
+    result = concat(result, str("{\"label\":\"loop\",\"kind\":14},"));
+    result = concat(result, str("{\"label\":\"for\",\"kind\":14},"));
+    result = concat(result, str("{\"label\":\"in\",\"kind\":14},"));
+    result = concat(result, str("{\"label\":\"return\",\"kind\":14},"));
+    result = concat(result, str("{\"label\":\"break\",\"kind\":14},"));
+    result = concat(result, str("{\"label\":\"continue\",\"kind\":14},"));
+    result = concat(result, str("{\"label\":\"ref\",\"kind\":14},"));
+    result = concat(result, str("{\"label\":\"pub\",\"kind\":14},"));
+    result = concat(result, str("{\"label\":\"test\",\"kind\":14},"));
+    result = concat(result, str("{\"label\":\"assert\",\"kind\":14},"));
+    result = concat(result, str("{\"label\":\"unsafe\",\"kind\":14}"));
+    result = concat(result, str("]}"));
+    send_response(id, result);
+}
+
+/// Handle textDocument/definition request
+def handle_definition(id: i32, params: ref char) {
+    send_response(id, str("null"));
+}
+
+/// Handle textDocument/diagnostic request  
+def handle_diagnostic(id: i32, params: ref char) {
+    mut result: string = str("{\"kind\":\"full\",\"items\":[]}");
+    send_response(id, result);
+}
+
+/// Process a single JSON-RPC message
+def process_message(message: string) {
+    mut doc: ref char = parse(message);
+    if doc == nil {
+        return;
+    }
+    
+    mut root: ref char = get_root(doc);
+    if root == nil {
+        free_doc(doc);
+        return;
+    }
+    
+    mut method_val: ref char = obj_get(root, str("method"));
+    mut id_val: ref char = obj_get(root, str("id"));
+    mut params_val: ref char = obj_get(root, str("params"));
+    
+    if method_val != nil {
+        mut method: string = get_str(method_val);
+        
+        mut id: i32 = 0;
+        if id_val != nil {
+            id = get_int(id_val);
+        }
+        
+        if equals_c(method, "initialize") {
+            handle_initialize(id, params_val);
+        } elif equals_c(method, "initialized") {
+        } elif equals_c(method, "shutdown") {
+            send_response(id, str("null"));
+        } elif equals_c(method, "exit") {
+            quit(0);
+        } elif equals_c(method, "textDocument/didOpen") {
+            handle_did_open(params_val);
+        } elif equals_c(method, "textDocument/didChange") {
+            handle_did_change(params_val);
+        } elif equals_c(method, "textDocument/didClose") {
+            handle_did_close(params_val);
+        } elif equals_c(method, "textDocument/hover") {
+            handle_hover(id, params_val);
+        } elif equals_c(method, "textDocument/completion") {
+            handle_completion(id, params_val);
+        } elif equals_c(method, "textDocument/definition") {
+            handle_definition(id, params_val);
+        } elif equals_c(method, "textDocument/diagnostic") {
+            handle_diagnostic(id, params_val);
+        }
+    }
+    
+    free_doc(doc);
+}
+
+/// Main LSP server loop
+def main() {
+    init_lsp();
+    
+    loop {
+        mut message: string = read_message();
+        if str_len(message) == 0 {
+            continue;
+        }
+        process_message(message);
+    }
+}
