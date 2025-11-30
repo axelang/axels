@@ -1,0 +1,9 @@
+{
+    "name": "axels",
+    "description": "Axe language server",
+    "copyright": "Copyright © 2025",
+    "license": "GPL-3.0",
+    "targetType": "executable",
+    "targetName": "axels",
+    "dflags": ["-preview=in"]
+}
