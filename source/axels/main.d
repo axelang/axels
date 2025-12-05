@@ -598,7 +598,7 @@ string[] axeBuiltins = [
     "println", "print", "print_str", "str", "concat", "substr", "strip",
     "read_file", "write_file", "file_exists", "delete_file", "is_directory",
     "exec_from_string", "get_cmdline_args", "ref_of", "Arena", "StringList",
-    "compare", "find_char_from", "has_suffix", "trim_suffix"
+    "compare", "find_char_from", "has_suffix", "trim_suffix", "addr"
 ];
 
 enum SymbolKind
@@ -1533,7 +1533,7 @@ void handleCompletion(LspRequest req)
     string[] keywords = [
         "def", "pub", "mut", "val", "loop", "for", "in", "if", "else",
         "elif", "switch", "case", "break", "continue", "model", "enum",
-        "use", "test", "assert", "unsafe", "parallel", "single", "platform"
+        "use", "test", "assert", "unsafe", "parallel", "single", "platform", "return"
     ];
 
     foreach (k; keywords)
