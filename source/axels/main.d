@@ -8,6 +8,7 @@ import std.exception;
 import std.process;
 import std.file;
 import std.algorithm;
+import std.path;
 
 /** 
  * Some LSP request to the server.
@@ -620,6 +621,397 @@ struct SymbolInfo
     string doc;
 }
 
+/// Represents a field in a model
+struct ModelField
+{
+    string name;
+    string type;
+    string doc;
+}
+
+/// Represents a method in a model
+struct ModelMethod
+{
+    string name;
+    string signature;
+    string doc;
+    bool isStatic;
+}
+
+/// Represents a parsed model definition
+struct ModelDef
+{
+    string name;
+    ModelField[] fields;
+    ModelMethod[] methods;
+    string doc;
+}
+
+/// Global cache of parsed models
+__gshared ModelDef[string] g_modelCache;
+
+/// Parses all models from text and returns them
+ModelDef[] parseModelsFromText(string text)
+{
+    ModelDef[] models;
+    auto lines = text.splitLines();
+
+    for (size_t i = 0; i < lines.length; i++)
+    {
+        auto line = lines[i].strip();
+
+        bool isPub = line.startsWith("pub model ");
+        bool isModel = isPub || line.startsWith("model ");
+
+        if (isModel)
+        {
+            ModelDef model;
+
+            size_t nameStart = isPub ? 10 : 6;
+            auto restOfLine = line[nameStart .. $].strip();
+            size_t nameEnd = 0;
+            while (nameEnd < restOfLine.length && wordChars.canFind(restOfLine[nameEnd]))
+                nameEnd++;
+            model.name = restOfLine[0 .. nameEnd];
+
+            model.doc = getDocStringAboveLine(lines, i);
+            size_t braceStart = i;
+            while (braceStart < lines.length && !lines[braceStart].canFind("{"))
+                braceStart++;
+
+            if (braceStart >= lines.length)
+                continue;
+
+            int braceCount = 0;
+            bool inModel = false;
+            string currentDoc = "";
+
+            for (size_t j = braceStart; j < lines.length; j++)
+            {
+                auto modelLine = lines[j];
+                foreach (ch; modelLine)
+                {
+                    if (ch == '{')
+                        braceCount++;
+                    else if (ch == '}')
+                        braceCount--;
+                }
+
+                if (braceCount > 0)
+                    inModel = true;
+
+                auto trimmed = modelLine.strip();
+
+                if (trimmed.startsWith("///"))
+                {
+                    if (currentDoc.length > 0)
+                        currentDoc ~= "\n";
+                    currentDoc ~= trimmed[3 .. $].strip();
+                    continue;
+                }
+
+                if (inModel && braceCount == 1 && trimmed.length > 0 &&
+                    !trimmed.startsWith("def ") && !trimmed.startsWith("pub def ") &&
+                    !trimmed.startsWith("//") && !trimmed.startsWith("{") && !trimmed.startsWith(
+                        "}"))
+                {
+                    auto colonIdx = trimmed.indexOf(":");
+                    if (colonIdx > 0)
+                    {
+                        auto fieldName = trimmed[0 .. colonIdx].strip();
+                        auto afterColon = trimmed[colonIdx + 1 .. $].strip();
+
+                        if (afterColon.length > 0 && afterColon[$ - 1] == ';')
+                            afterColon = afterColon[0 .. $ - 1].strip();
+
+                        if (!afterColon.canFind("(") && fieldName.length > 0 &&
+                            wordChars.canFind(fieldName[0]))
+                        {
+                            ModelField field;
+                            field.name = cast(string) fieldName;
+                            field.type = cast(string) afterColon;
+                            field.doc = currentDoc;
+                            model.fields ~= field;
+                        }
+                    }
+                    currentDoc = "";
+                }
+
+                bool isPubDef = trimmed.startsWith("pub def ");
+                bool isDef = isPubDef || trimmed.startsWith("def ");
+
+                if (inModel && isDef)
+                {
+                    ModelMethod method;
+                    size_t defStart = isPubDef ? 8 : 4;
+                    auto methodRest = trimmed[defStart .. $].strip();
+
+                    size_t methodNameEnd = 0;
+                    while (methodNameEnd < methodRest.length && wordChars.canFind(
+                            methodRest[methodNameEnd]))
+                        methodNameEnd++;
+                    method.name = cast(string) methodRest[0 .. methodNameEnd];
+
+                    auto parenStart = methodRest.indexOf("(");
+                    if (parenStart >= 0)
+                    {
+                        int parenCount = 0;
+                        size_t sigEnd = parenStart;
+                        for (size_t k = parenStart; k < methodRest.length; k++)
+                        {
+                            if (methodRest[k] == '(')
+                                parenCount++;
+                            else if (methodRest[k] == ')')
+                                parenCount--;
+                            if (parenCount == 0)
+                            {
+                                sigEnd = k + 1;
+                                break;
+                            }
+                        }
+
+                        if (sigEnd < methodRest.length)
+                        {
+                            auto afterParen = methodRest[sigEnd .. $].strip();
+                            if (afterParen.startsWith(":"))
+                            {
+                                size_t retEnd = 1;
+                                while (retEnd < afterParen.length &&
+                                    afterParen[retEnd] != '{' && afterParen[retEnd] != ';')
+                                    retEnd++;
+                                method.signature = cast(string)(
+                                    methodRest[0 .. sigEnd] ~ afterParen[0 .. retEnd]);
+                            }
+                            else
+                            {
+                                method.signature = cast(string) methodRest[0 .. sigEnd];
+                            }
+                        }
+                        else
+                        {
+                            method.signature = cast(string) methodRest[0 .. sigEnd];
+                        }
+
+                        auto paramSection = methodRest[parenStart + 1 .. sigEnd - 1];
+                        method.isStatic = true;
+                        if (paramSection.canFind("ref " ~ model.name) ||
+                            paramSection.canFind(": " ~ model.name))
+                        {
+                            method.isStatic = false;
+                        }
+                    }
+
+                    method.doc = currentDoc;
+                    model.methods ~= method;
+                    currentDoc = "";
+                }
+                else if (!trimmed.startsWith("///"))
+                {
+                    currentDoc = "";
+                }
+
+                if (braceCount == 0 && inModel)
+                    break;
+            }
+
+            models ~= model;
+        }
+    }
+
+    return models;
+}
+
+/// Gets all models from a document (caches results)
+ModelDef[] getModelsForDocument(string uri, string text)
+{
+    return parseModelsFromText(text);
+}
+
+/// Find the type of a variable at a given position
+string findVariableType(string text, string varName, size_t line0, size_t char0)
+{
+    auto lines = text.splitLines();
+
+    for (long i = cast(long) line0; i >= 0; i--)
+    {
+        auto line = lines[i];
+
+        auto valPattern = "val " ~ varName ~ ":";
+        auto mutPattern = "mut " ~ varName ~ ":";
+
+        auto valIdx = line.indexOf(valPattern);
+        auto mutIdx = line.indexOf(mutPattern);
+
+        long foundIdx = -1;
+        size_t patternLen = 0;
+
+        if (valIdx >= 0)
+        {
+            foundIdx = valIdx;
+            patternLen = valPattern.length;
+        }
+        else if (mutIdx >= 0)
+        {
+            foundIdx = mutIdx;
+            patternLen = mutPattern.length;
+        }
+
+        if (foundIdx >= 0)
+        {
+            auto afterColon = line[foundIdx + patternLen .. $].strip();
+
+            size_t typeEnd = 0;
+            while (typeEnd < afterColon.length &&
+                (wordChars.canFind(afterColon[typeEnd]) || afterColon[typeEnd] == '*'))
+                typeEnd++;
+
+            if (typeEnd > 0)
+            {
+                auto typeName = afterColon[0 .. typeEnd];
+                if (typeName == "ref" && typeEnd < afterColon.length)
+                {
+                    auto rest = afterColon[typeEnd .. $].strip();
+                    typeEnd = 0;
+                    while (typeEnd < rest.length && wordChars.canFind(rest[typeEnd]))
+                        typeEnd++;
+                    return cast(string) rest[0 .. typeEnd];
+                }
+                return cast(string) typeName;
+            }
+        }
+
+        auto paramPattern = varName ~ ":";
+        auto paramIdx = line.indexOf(paramPattern);
+        if (paramIdx >= 0)
+        {
+            if (paramIdx > 0 && wordChars.canFind(line[paramIdx - 1]))
+                continue;
+
+            auto afterColon = line[paramIdx + paramPattern.length .. $].strip();
+            size_t typeEnd = 0;
+            while (typeEnd < afterColon.length &&
+                (wordChars.canFind(afterColon[typeEnd]) || afterColon[typeEnd] == '*'))
+                typeEnd++;
+
+            if (typeEnd > 0)
+            {
+                auto typeName = afterColon[0 .. typeEnd];
+                if (typeName == "ref" && typeEnd < afterColon.length)
+                {
+                    auto rest = afterColon[typeEnd .. $].strip();
+                    typeEnd = 0;
+                    while (typeEnd < rest.length && wordChars.canFind(rest[typeEnd]))
+                        typeEnd++;
+                    return cast(string) rest[0 .. typeEnd];
+                }
+                return cast(string) typeName;
+            }
+        }
+    }
+
+    return "";
+}
+
+/// Extract the word before the dot at a given position
+string extractWordBeforeDot(string text, size_t line0, size_t char0)
+{
+    auto lines = text.splitLines();
+    if (line0 >= lines.length)
+        return "";
+
+    auto line = lines[line0];
+    if (char0 == 0 || char0 > line.length)
+        return "";
+
+    long dotPos = cast(long) char0 - 1;
+    while (dotPos >= 0 && line[dotPos] == ' ')
+        dotPos--;
+
+    if (dotPos < 0 || line[dotPos] != '.')
+    {
+        if (char0 < line.length && line[char0] == '.')
+            dotPos = char0;
+        else if (char0 > 0 && line[char0 - 1] == '.')
+            dotPos = cast(long) char0 - 1;
+        else
+            return "";
+    }
+
+    long wordEnd = dotPos;
+    long wordStart = wordEnd - 1;
+    while (wordStart >= 0 && wordChars.canFind(line[wordStart]))
+        wordStart--;
+    wordStart++;
+
+    if (wordStart >= wordEnd)
+        return "";
+
+    return cast(string) line[wordStart .. wordEnd];
+}
+
+/// Get the standard library path
+string getStdLibPath()
+{
+    import std.process : environment;
+    import std.path : buildPath, dirName;
+
+    auto axeHome = environment.get("AXE_HOME", "");
+    if (axeHome.length > 0)
+    {
+        return buildPath(axeHome, "std");
+    }
+
+    version (Windows)
+    {
+        return "A:\\Projects\\Apps\\Axeworking\\axe\\std";
+    }
+    else
+    {
+        return "/usr/local/lib/axe/std";
+    }
+}
+
+/// Load models from standard library
+ModelDef[] loadStdLibModels()
+{
+    ModelDef[] models;
+
+    string stdPath = getStdLibPath();
+    debugLog("Looking for std lib at: ", stdPath);
+
+    try
+    {
+        import std.file : dirEntries, SpanMode, readText, exists;
+
+        if (!exists(stdPath))
+        {
+            debugLog("Std lib path does not exist");
+            return models;
+        }
+
+        foreach (entry; dirEntries(stdPath, "*.axec", SpanMode.shallow))
+        {
+            try
+            {
+                string content = readText(entry.name);
+                auto parsed = parseModelsFromText(content);
+                models ~= parsed;
+                debugLog("Loaded ", parsed.length, " models from ", entry.name);
+            }
+            catch (Exception e)
+            {
+                debugLog("Failed to parse ", entry.name, ": ", e.msg);
+            }
+        }
+    }
+    catch (Exception e)
+    {
+        debugLog("Failed to load std lib: ", e.msg);
+    }
+
+    return models;
+}
+
 SymbolInfo analyzeSymbol(string word, string fullText, size_t line0, size_t char0, string currentUri)
 {
     SymbolInfo info;
@@ -729,7 +1121,8 @@ SymbolInfo analyzeSymbol(string word, string fullText, size_t line0, size_t char
 
         auto defPattern = "def " ~ word;
         auto pubDefPattern = "pub def " ~ word;
-        if (currentLine.strip().startsWith(defPattern) || currentLine.strip().startsWith(pubDefPattern))
+        if (currentLine.strip().startsWith(defPattern) || currentLine.strip()
+            .startsWith(pubDefPattern))
         {
             info.kind = SymbolKind.Function;
             info.context = "function definition";
@@ -780,7 +1173,8 @@ SymbolInfo analyzeSymbol(string word, string fullText, size_t line0, size_t char
 
 string getDocStringAboveLine(string[] lines, size_t defLine)
 {
-    if (defLine == 0) return "";
+    if (defLine == 0)
+        return "";
     string[] parts;
     long i = cast(long) defLine - 1;
     for (; i >= 0; --i)
@@ -797,7 +1191,8 @@ string getDocStringAboveLine(string[] lines, size_t defLine)
         }
         break;
     }
-    if (parts.length == 0) return "";
+    if (parts.length == 0)
+        return "";
     parts.reverse();
     return parts.join("\n");
 }
@@ -869,18 +1264,18 @@ string getHoverText(SymbolInfo info)
     case SymbolKind.Type:
         return "**`" ~ info.name ~ "`** *(type)*\n\nBuilt-in type";
     case SymbolKind.Function:
-    {
-        string header = "";
-        if (info.doc.length > 0)
         {
-            header = info.doc ~ "\n\n";
+            string header = "";
+            if (info.doc.length > 0)
+            {
+                header = info.doc ~ "\n\n";
+            }
+            if (info.context == "function definition")
+            {
+                return header ~ "**`def " ~ info.name ~ "`** *(function)*\n\nFunction definition";
+            }
+            return header ~ "**`" ~ info.name ~ "()`** *(function)*\n\nFunction call";
         }
-        if (info.context == "function definition")
-        {
-            return header ~ "**`def " ~ info.name ~ "`** *(function)*\n\nFunction definition";
-        }
-        return header ~ "**`" ~ info.name ~ "()`** *(function)*\n\nFunction call";
-    }
     case SymbolKind.Variable:
         if (info.context == "parameter")
         {
@@ -1010,6 +1405,128 @@ void handleCompletion(LspRequest req)
     }
 
     string text = *it;
+
+    auto lines = text.splitLines();
+    bool isDotCompletion = false;
+    string wordBeforeDot = "";
+
+    if (line0 < lines.length && char0 > 0)
+    {
+        auto line = lines[line0];
+        size_t checkPos = char0 - 1;
+        while (checkPos > 0 && wordChars.canFind(line[checkPos]))
+            checkPos--;
+
+        if (checkPos < line.length && line[checkPos] == '.')
+        {
+            isDotCompletion = true;
+            wordBeforeDot = extractWordBeforeDot(text, line0, checkPos + 1);
+            debugLog("completion: dot completion triggered, word before dot='", wordBeforeDot, "'");
+        }
+        else if (char0 > 0 && char0 <= line.length && line[char0 - 1] == '.')
+        {
+            isDotCompletion = true;
+            wordBeforeDot = extractWordBeforeDot(text, line0, char0);
+            debugLog("completion: dot completion at cursor, word before dot='", wordBeforeDot, "'");
+        }
+    }
+
+    JSONValue[] items;
+    bool[string] seen;
+
+    if (isDotCompletion && wordBeforeDot.length > 0)
+    {
+        debugLog("completion: handling dot completion for '", wordBeforeDot, "'");
+
+        ModelDef[] allModels;
+
+        auto docModels = parseModelsFromText(text);
+        allModels ~= docModels;
+
+        auto stdModels = loadStdLibModels();
+        allModels ~= stdModels;
+
+        debugLog("completion: loaded ", allModels.length, " total models");
+
+        string targetModelName = "";
+        foreach (model; allModels)
+        {
+            if (model.name == wordBeforeDot)
+            {
+                targetModelName = model.name;
+                debugLog("completion: found direct model match '", model.name, "'");
+                break;
+            }
+        }
+
+        if (targetModelName.length == 0)
+        {
+            targetModelName = findVariableType(text, wordBeforeDot, line0, char0);
+            debugLog("completion: variable '", wordBeforeDot, "' has type '", targetModelName, "'");
+        }
+
+        if (targetModelName.length > 0)
+        {
+            foreach (model; allModels)
+            {
+                if (model.name == targetModelName)
+                {
+                    debugLog("completion: providing completions for model '", model.name, "'");
+
+                    foreach (field; model.fields)
+                    {
+                        if (field.name !in seen)
+                        {
+                            JSONValue item;
+                            item["label"] = field.name;
+                            item["kind"] = 5L;
+                            item["detail"] = field.type;
+                            if (field.doc.length > 0)
+                            {
+                                JSONValue docVal;
+                                docVal["kind"] = "markdown";
+                                docVal["value"] = field.doc;
+                                item["documentation"] = docVal;
+                            }
+                            items ~= item;
+                            seen[field.name] = true;
+                        }
+                    }
+                    foreach (method; model.methods)
+                    {
+                        if (method.name !in seen)
+                        {
+                            JSONValue item;
+                            item["label"] = method.name;
+                            item["kind"] = 2L; // Method
+                            item["detail"] = method.signature;
+                            if (method.doc.length > 0)
+                            {
+                                JSONValue docVal;
+                                docVal["kind"] = "markdown";
+                                docVal["value"] = method.doc;
+                                item["documentation"] = docVal;
+                            }
+                            item["insertText"] = method.name ~ "(";
+                            items ~= item;
+                            seen[method.name] = true;
+                        }
+                    }
+
+                    break;
+                }
+            }
+        }
+
+        debugLog("completion: dot completion returning ", items.length, " items");
+
+        JSONValue result;
+        result["isIncomplete"] = false;
+        result["items"] = JSONValue(items);
+        sendResponse(req.id, result);
+        return;
+    }
+
     string prefix = extractWordAt(text, line0, char0);
     debugLog("completion: prefix='", prefix, "'");
 
@@ -1018,9 +1535,6 @@ void handleCompletion(LspRequest req)
         "elif", "switch", "case", "break", "continue", "model", "enum",
         "use", "test", "assert", "unsafe", "parallel", "single", "platform"
     ];
-
-    JSONValue[] items;
-    bool[string] seen;
 
     foreach (k; keywords)
     {
@@ -1072,6 +1586,31 @@ void handleCompletion(LspRequest req)
                 item["kind"] = 6L;
                 items ~= item;
                 seen[current] = true;
+            }
+        }
+    }
+
+    // Also add model names from std lib for regular completion
+    auto stdModels = loadStdLibModels();
+    foreach (model; stdModels)
+    {
+        if (prefix.length == 0 || model.name.startsWith(prefix))
+        {
+            if (model.name !in seen)
+            {
+                JSONValue item;
+                item["label"] = model.name;
+                item["kind"] = 7L; // Class/Model
+                item["detail"] = "model";
+                if (model.doc.length > 0)
+                {
+                    JSONValue docVal;
+                    docVal["kind"] = "markdown";
+                    docVal["value"] = model.doc;
+                    item["documentation"] = docVal;
+                }
+                items ~= item;
+                seen[model.name] = true;
             }
         }
     }
@@ -1137,7 +1676,8 @@ void handleDocumentSymbol(LspRequest req)
     foreach (idx, ln; lines)
     {
         auto t = ln.strip();
-        if (t.length == 0) continue;
+        if (t.length == 0)
+            continue;
 
         if (t.startsWith("def ") || t.startsWith("pub def "))
         {
@@ -1147,9 +1687,11 @@ void handleDocumentSymbol(LspRequest req)
             {
                 pos = cast(size_t) ln.indexOf("def");
                 size_t start = pos + 3;
-                while (start < ln.length && ln[start] == ' ') ++start;
+                while (start < ln.length && ln[start] == ' ')
+                    ++start;
                 size_t end = start;
-                while (end < ln.length && wordChars.canFind(ln[end])) ++end;
+                while (end < ln.length && wordChars.canFind(ln[end]))
+                    ++end;
                 name = ln[start .. end];
 
                 JSONValue symbol;
@@ -1162,7 +1704,7 @@ void handleDocumentSymbol(LspRequest req)
                 sPos["line"] = cast(long) idx;
                 sPos["character"] = cast(long) pos;
                 ePos["line"] = cast(long) idx;
-                ePos["character"] = cast(long) (pos + name.length);
+                ePos["character"] = cast(long)(pos + name.length);
                 range["start"] = sPos;
                 range["end"] = ePos;
 
@@ -1177,9 +1719,11 @@ void handleDocumentSymbol(LspRequest req)
         {
             size_t pos = cast(size_t) ln.indexOf("model");
             size_t start = pos + 5;
-            while (start < ln.length && ln[start] == ' ') ++start;
+            while (start < ln.length && ln[start] == ' ')
+                ++start;
             size_t end = start;
-            while (end < ln.length && wordChars.canFind(ln[end])) ++end;
+            while (end < ln.length && wordChars.canFind(ln[end]))
+                ++end;
             string name = ln[start .. end];
 
             JSONValue symbol;
@@ -1192,7 +1736,7 @@ void handleDocumentSymbol(LspRequest req)
             sPos["line"] = cast(long) idx;
             sPos["character"] = cast(long) pos;
             ePos["line"] = cast(long) idx;
-            ePos["character"] = cast(long) (pos + name.length);
+            ePos["character"] = cast(long)(pos + name.length);
             range["start"] = sPos;
             range["end"] = ePos;
 
@@ -1206,9 +1750,11 @@ void handleDocumentSymbol(LspRequest req)
         {
             size_t pos = cast(size_t) ln.indexOf("enum");
             size_t start = pos + 4;
-            while (start < ln.length && ln[start] == ' ') ++start;
+            while (start < ln.length && ln[start] == ' ')
+                ++start;
             size_t end = start;
-            while (end < ln.length && wordChars.canFind(ln[end])) ++end;
+            while (end < ln.length && wordChars.canFind(ln[end]))
+                ++end;
             string name = ln[start .. end];
 
             JSONValue symbol;
@@ -1221,7 +1767,7 @@ void handleDocumentSymbol(LspRequest req)
             sPos["line"] = cast(long) idx;
             sPos["character"] = cast(long) pos;
             ePos["line"] = cast(long) idx;
-            ePos["character"] = cast(long) (pos + name.length);
+            ePos["character"] = cast(long)(pos + name.length);
             range["start"] = sPos;
             range["end"] = ePos;
 
@@ -1242,11 +1788,15 @@ void handleDocumentSymbol(LspRequest req)
             size_t start = pos;
             string name;
             size_t after = pos;
-            if (ln.canFind("val ")) after = cast(size_t) ln.indexOf("val") + 3;
-            else if (ln.canFind("mut ")) after = cast(size_t) ln.indexOf("mut") + 3;
-            while (after < ln.length && ln[after] == ' ') ++after;
+            if (ln.canFind("val "))
+                after = cast(size_t) ln.indexOf("val") + 3;
+            else if (ln.canFind("mut "))
+                after = cast(size_t) ln.indexOf("mut") + 3;
+            while (after < ln.length && ln[after] == ' ')
+                ++after;
             size_t end = after;
-            while (end < ln.length && wordChars.canFind(ln[end])) ++end;
+            while (end < ln.length && wordChars.canFind(ln[end]))
+                ++end;
             name = ln[after .. end];
 
             if (name.length > 0)
@@ -1260,7 +1810,7 @@ void handleDocumentSymbol(LspRequest req)
                 sPos["line"] = cast(long) idx;
                 sPos["character"] = cast(long) pos;
                 ePos["line"] = cast(long) idx;
-                ePos["character"] = cast(long) (pos + name.length);
+                ePos["character"] = cast(long)(pos + name.length);
                 range["start"] = sPos;
                 range["end"] = ePos;
 
@@ -1288,7 +1838,8 @@ bool findDefinitionInText(string text, string word, out size_t foundLine, out si
         if (t.startsWith(pat1) || t.startsWith(pat2))
         {
             auto pos = ln.indexOf("def");
-            if (pos < 0) pos = 0;
+            if (pos < 0)
+                pos = 0;
             foundLine = idx;
             foundChar = cast(size_t) pos;
             return true;
@@ -1322,6 +1873,7 @@ bool findDefinitionAcrossFiles(
     try
     {
         import std.path : dirName, buildPath, extension;
+
         startDir = dirName(currentPath);
     }
     catch (Exception)
@@ -1331,13 +1883,17 @@ bool findDefinitionAcrossFiles(
 
     import std.file : dirEntries;
     import std.file : SpanMode;
+
     foreach (dirEntry; dirEntries(startDir, SpanMode.depth))
     {
-        if (!dirEntry.isFile) continue;
+        if (!dirEntry.isFile)
+            continue;
         auto ext = dirEntry.name.split('.');
-        if (ext.length == 0) continue;
+        if (ext.length == 0)
+            continue;
         auto fileExt = "." ~ ext[$ - 1];
-        if (fileExt != ".axe" && fileExt != ".axec") continue;
+        if (fileExt != ".axe" && fileExt != ".axec")
+            continue;
 
         string fileText;
         try
@@ -1433,7 +1989,7 @@ void handleDefinition(LspRequest req)
         sPos["line"] = cast(long) defLine;
         sPos["character"] = cast(long) defChar;
         ePos["line"] = cast(long) defLine;
-        ePos["character"] = cast(long) (defChar + word.length);
+        ePos["character"] = cast(long)(defChar + word.length);
         range["start"] = sPos;
         range["end"] = ePos;
         loc["range"] = range;
@@ -1458,7 +2014,7 @@ void handleDefinition(LspRequest req)
         sPos["line"] = cast(long) outLine;
         sPos["character"] = cast(long) outChar;
         ePos["line"] = cast(long) outLine;
-        ePos["character"] = cast(long) (outChar + word.length);
+        ePos["character"] = cast(long)(outChar + word.length);
         range["start"] = sPos;
         range["end"] = ePos;
         loc["range"] = range;
