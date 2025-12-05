@@ -34,6 +34,7 @@ struct Diagnostic
 
 __gshared string[string] g_openDocs;
 __gshared bool g_debugMode = false;
+__gshared string g_stdlibPath = "";
 
 void debugLog(T...)(T args)
 {
@@ -955,6 +956,11 @@ string getStdLibPath()
     import std.process : environment;
     import std.path : buildPath, dirName;
 
+    if (g_stdlibPath.length > 0)
+    {
+        return g_stdlibPath;
+    }
+
     auto axeHome = environment.get("AXE_HOME", "");
     if (axeHome.length > 0)
     {
@@ -963,7 +969,7 @@ string getStdLibPath()
 
     version (Windows)
     {
-        return "A:\\Projects\\Apps\\Axeworking\\axe\\std";
+        return "C:\\axe\\std";
     }
     else
     {
@@ -2082,7 +2088,7 @@ void dispatch(LspRequest req)
     }
 }
 
-int main()
+int main(string[] args)
 {
     import std.process : environment;
     import std.stdio : stdin, stdout, stderr;
@@ -2096,10 +2102,27 @@ int main()
         _setmode(fileno(stdout.getFP()), _O_BINARY);
     }
 
+    for (size_t i = 1; i < args.length; i++)
+    {
+        if (args[i] == "--stdlib" && i + 1 < args.length)
+        {
+            g_stdlibPath = args[i + 1];
+            i++;
+        }
+    }
+
     if (environment.get("AXELS_DEBUG", "") == "1")
     {
         g_debugMode = true;
         debugLog("=== Axe Language Server Starting (Debug Mode) ===");
+        if (g_stdlibPath.length > 0)
+        {
+            debugLog("Using stdlib path from argument: ", g_stdlibPath);
+        }
+        else
+        {
+            debugLog("Using default stdlib path: ", getStdLibPath());
+        }
     }
 
     debugLog("Entering main loop");
