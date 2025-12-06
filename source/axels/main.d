@@ -1539,7 +1539,8 @@ void handleCompletion(LspRequest req)
     string[] keywords = [
         "def", "pub", "mut", "val", "loop", "for", "in", "if", "else",
         "elif", "switch", "case", "break", "continue", "model", "enum",
-        "use", "test", "assert", "unsafe", "parallel", "single", "platform", "return"
+        "use", "test", "assert", "unsafe", "parallel", "single", "platform",
+        "return"
     ];
 
     foreach (k; keywords)
@@ -1875,54 +1876,126 @@ bool findDefinitionAcrossFiles(
         }
     }
 
+    string[] searchDirs;
+
     string startDir = currentPath;
     try
     {
         import std.path : dirName, buildPath, extension;
 
-        startDir = dirName(currentPath);
+        if (exists(currentPath) && isFile(currentPath))
+            startDir = dirName(currentPath);
     }
     catch (Exception)
     {
         startDir = ".";
     }
 
+    string projectRoot = "";
+    string curr = startDir;
+    try
+    {
+        while (true)
+        {
+            if (exists(buildPath(curr, "axe.mod")))
+            {
+                projectRoot = curr;
+                break;
+            }
+            string parent = dirName(curr);
+            version (Windows)
+            {
+                if (parent == curr)
+                    break;
+            }
+            else
+            {
+                if (parent == curr)
+                    break;
+            }
+            curr = parent;
+        }
+    }
+    catch (Exception)
+    {
+    }
+
+    if (projectRoot.length > 0)
+        searchDirs ~= projectRoot;
+    else
+        searchDirs ~= startDir;
+
+    string axeHome = environment.get("AXE_HOME", "");
+    if (axeHome.length > 0)
+    {
+        try
+        {
+            if (exists(axeHome) && isDir(axeHome))
+            {
+                searchDirs ~= axeHome;
+            }
+        }
+        catch (Exception)
+        {
+        }
+    }
+
     import std.file : dirEntries;
     import std.file : SpanMode;
 
-    foreach (dirEntry; dirEntries(startDir, SpanMode.depth))
+    foreach (dir; searchDirs)
     {
-        if (!dirEntry.isFile)
-            continue;
-        auto ext = dirEntry.name.split('.');
-        if (ext.length == 0)
-            continue;
-        auto fileExt = "." ~ ext[$ - 1];
-        if (fileExt != ".axe" && fileExt != ".axec")
-            continue;
-
-        string fileText;
         try
         {
-            fileText = readText(dirEntry.name);
+            foreach (dirEntry; dirEntries(dir, SpanMode.depth))
+            {
+                if (!dirEntry.isFile)
+                    continue;
+                auto ext = dirEntry.name.split('.');
+                if (ext.length == 0)
+                    continue;
+                auto fileExt = "." ~ ext[$ - 1];
+                if (fileExt != ".axe" && fileExt != ".axec")
+                    continue;
+
+                string fileText;
+                try
+                {
+                    fileText = readText(dirEntry.name);
+                }
+                catch (Exception)
+                {
+                    continue;
+                }
+
+                size_t ln, ch;
+                if (findDefinitionInText(fileText, word, ln, ch))
+                {
+                    string fileUri = dirEntry.name;
+
+                    version (Windows)
+                    {
+                        import std.array : replace;
+
+                        fileUri = fileUri.replace("\\", "/");
+                    }
+
+                    if (!fileUri.startsWith("file://"))
+                    {
+                        if (!fileUri.startsWith("/"))
+                            fileUri = "/" ~ fileUri;
+                        fileUri = "file://" ~ fileUri;
+                    }
+                    outUri = fileUri;
+                    outLine = ln;
+                    outChar = ch;
+                    return true;
+                }
+            }
         }
         catch (Exception)
         {
             continue;
-        }
-
-        size_t ln, ch;
-        if (findDefinitionInText(fileText, word, ln, ch))
-        {
-            string fileUri = dirEntry.name;
-            if (!fileUri.startsWith("file://"))
-            {
-                fileUri = "file://" ~ fileUri;
-            }
-            outUri = fileUri;
-            outLine = ln;
-            outChar = ch;
-            return true;
         }
     }
 
