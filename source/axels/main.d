@@ -1018,6 +1018,119 @@ ModelDef[] loadStdLibModels()
     return models;
 }
 
+string[] getSearchDirectories(string currentPath)
+{
+    string[] searchDirs;
+    string startDir = currentPath;
+    try
+    {
+        import std.path : dirName, buildPath, extension;
+
+        if (exists(currentPath) && isFile(currentPath))
+            startDir = dirName(currentPath);
+    }
+    catch (Exception)
+    {
+        startDir = ".";
+    }
+
+    string projectRoot = "";
+    string curr = startDir;
+    try
+    {
+        while (true)
+        {
+            if (exists(buildPath(curr, "axe.mod")))
+            {
+                projectRoot = curr;
+                break;
+            }
+            string parent = dirName(curr);
+            version (Windows)
+            {
+                if (parent == curr)
+                    break;
+            }
+            else
+            {
+                if (parent == curr)
+                    break;
+            }
+            curr = parent;
+        }
+    }
+    catch (Exception)
+    {
+    }
+
+    if (projectRoot.length > 0)
+        searchDirs ~= projectRoot;
+    else
+        searchDirs ~= startDir;
+
+    string axeHome = environment.get("AXE_HOME", "");
+    if (axeHome.length > 0)
+    {
+        try
+        {
+            if (exists(axeHome) && isDir(axeHome))
+            {
+                searchDirs ~= axeHome;
+            }
+        }
+        catch (Exception)
+        {
+        }
+    }
+
+    return searchDirs;
+}
+
+ModelDef[] loadProjectModels(string currentPath)
+{
+    ModelDef[] allModels;
+    string[] searchDirs = getSearchDirectories(currentPath);
+
+    import std.file : dirEntries;
+    import std.file : SpanMode;
+
+    foreach (dir; searchDirs)
+    {
+        try
+        {
+            foreach (dirEntry; dirEntries(dir, SpanMode.depth))
+            {
+                if (!dirEntry.isFile)
+                    continue;
+                auto ext = dirEntry.name.split('.');
+                if (ext.length == 0)
+                    continue;
+                auto fileExt = "." ~ ext[$ - 1];
+                if (fileExt != ".axe" && fileExt != ".axec")
+                    continue;
+
+                string fileText;
+                try
+                {
+                    fileText = readText(dirEntry.name);
+                }
+                catch (Exception)
+                {
+                    continue;
+                }
+
+                auto models = parseModelsFromText(fileText);
+                allModels ~= models;
+            }
+        }
+        catch (Exception)
+        {
+            continue;
+        }
+    }
+    return allModels;
+}
+
 SymbolInfo analyzeSymbol(string word, string fullText, size_t line0, size_t char0, string currentUri)
 {
     SymbolInfo info;
@@ -1448,6 +1561,23 @@ void handleCompletion(LspRequest req)
 
         auto docModels = parseModelsFromText(text);
         allModels ~= docModels;
+        string currPath = uriToPath(uri);
+        auto projectModels = loadProjectModels(currPath);
+
+        foreach (pm; projectModels)
+        {
+            bool found = false;
+            foreach (m; allModels)
+            {
+                if (m.name == pm.name)
+                {
+                    found = true;
+                    break;
+                }
+            }
+            if (!found)
+                allModels ~= pm;
+        }
 
         auto stdModels = loadStdLibModels();
         allModels ~= stdModels;
@@ -1839,12 +1969,35 @@ bool findDefinitionInText(string text, string word, out size_t foundLine, out si
     auto lines = text.splitLines();
     string pat1 = "def " ~ word;
     string pat2 = "pub def " ~ word;
+    string pat3 = "model " ~ word;
+    string pat4 = "pub model " ~ word;
+    string pat5 = "enum " ~ word;
+    string pat6 = "pub enum " ~ word;
+
     foreach (idx, ln; lines)
     {
         auto t = ln.strip();
         if (t.startsWith(pat1) || t.startsWith(pat2))
         {
             auto pos = ln.indexOf("def");
+            if (pos < 0)
+                pos = 0;
+            foundLine = idx;
+            foundChar = cast(size_t) pos;
+            return true;
+        }
+        if (t.startsWith(pat3) || t.startsWith(pat4))
+        {
+            auto pos = ln.indexOf("model");
+            if (pos < 0)
+                pos = 0;
+            foundLine = idx;
+            foundChar = cast(size_t) pos;
+            return true;
+        }
+        if (t.startsWith(pat5) || t.startsWith(pat6))
+        {
+            auto pos = ln.indexOf("enum");
             if (pos < 0)
                 pos = 0;
             foundLine = idx;
@@ -1876,69 +2029,7 @@ bool findDefinitionAcrossFiles(
         }
     }
 
-    string[] searchDirs;
-
-    string startDir = currentPath;
-    try
-    {
-        import std.path : dirName, buildPath, extension;
-
-        if (exists(currentPath) && isFile(currentPath))
-            startDir = dirName(currentPath);
-    }
-    catch (Exception)
-    {
-        startDir = ".";
-    }
-
-    string projectRoot = "";
-    string curr = startDir;
-    try
-    {
-        while (true)
-        {
-            if (exists(buildPath(curr, "axe.mod")))
-            {
-                projectRoot = curr;
-                break;
-            }
-            string parent = dirName(curr);
-            version (Windows)
-            {
-                if (parent == curr)
-                    break;
-            }
-            else
-            {
-                if (parent == curr)
-                    break;
-            }
-            curr = parent;
-        }
-    }
-    catch (Exception)
-    {
-    }
-
-    if (projectRoot.length > 0)
-        searchDirs ~= projectRoot;
-    else
-        searchDirs ~= startDir;
-
-    string axeHome = environment.get("AXE_HOME", "");
-    if (axeHome.length > 0)
-    {
-        try
-        {
-            if (exists(axeHome) && isDir(axeHome))
-            {
-                searchDirs ~= axeHome;
-            }
-        }
-        catch (Exception)
-        {
-        }
-    }
+    string[] searchDirs = getSearchDirectories(currentPath);
 
     import std.file : dirEntries;
     import std.file : SpanMode;
@@ -2030,6 +2121,8 @@ void handleDefinition(LspRequest req)
     auto pos = pObj["position"].object;
     size_t line0 = cast(size_t) pos["line"].integer;
     size_t char0 = cast(size_t) pos["character"].integer;
+
+    debugLog("definition: uri=", uri, ", line=", line0, ", char=", char0);
 
     auto it = uri in g_openDocs;
     if (it is null)
