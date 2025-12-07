@@ -47,10 +47,19 @@ void debugLog(T...)(T args)
 
 string uriToPath(string uri)
 {
+    import std.uri : decodeComponent;
+
     enum prefix = "file://";
     if (uri.startsWith(prefix))
     {
         string path = uri[prefix.length .. $];
+        try
+        {
+            path = decodeComponent(path);
+        }
+        catch (Exception)
+        {
+        }
         version (Windows)
         {
             if (path.length > 0 && path[0] == '/')
@@ -58,6 +67,7 @@ string uriToPath(string uri)
                 path = path[1 .. $];
             }
         }
+        debugLog("uriToPath: ", uri, " -> ", path);
         return path;
     }
     return uri;
@@ -105,26 +115,51 @@ Diagnostic[] parseDiagnostics(string text)
             continue;
         }
 
+        if (trimmed.startsWith("error: "))
+        {
+            trimmed = trimmed[7 .. $];
+        }
+
+        string prefix = "";
+        if (trimmed.length > 2 && trimmed[1] == ':')
+        {
+            prefix = trimmed[0 .. 2];
+            trimmed = trimmed[2 .. $];
+        }
+
         auto first = trimmed.countUntil(':');
         if (first <= 0)
         {
             continue;
         }
-        auto second = trimmed.countUntil(':', first + 1);
-        if (second <= 0)
+        auto second = trimmed[first + 1 .. $].countUntil(':');
+        if (second < 0)
         {
             continue;
         }
-        auto third = trimmed.countUntil(':', second + 1);
-        if (third <= 0)
-        {
-            continue;
-        }
+        second = first + 1 + second;
 
-        string fileName = trimmed[0 .. first];
-        string lineStr = trimmed[first + 1 .. second];
-        string colStr = trimmed[second + 1 .. third];
-        string msg = trimmed[third + 1 .. $].strip();
+        auto rest = trimmed[second + 1 .. $];
+        auto thirdRel = rest.countUntil(':');
+        ptrdiff_t third = thirdRel >= 0 ? second + 1 + thirdRel : -1;
+
+        string fileName = prefix ~ trimmed[0 .. first];
+        string lineStr;
+        string colStr;
+        string msg;
+
+        if (third > 0)
+        {
+            lineStr = trimmed[first + 1 .. second];
+            colStr = trimmed[second + 1 .. third];
+            msg = trimmed[third + 1 .. $].strip();
+        }
+        else
+        {
+            lineStr = trimmed[first + 1 .. second];
+            colStr = "1";
+            msg = trimmed[second + 1 .. $].strip();
+        }
 
         size_t ln, col;
         try
@@ -134,6 +169,7 @@ Diagnostic[] parseDiagnostics(string text)
         }
         catch (Exception)
         {
+            debugLog("Failed to parse line/col from: ", trimmed);
             continue;
         }
 
@@ -143,6 +179,7 @@ Diagnostic[] parseDiagnostics(string text)
         d.column = col;
         d.message = msg;
         result ~= d;
+        debugLog("Parsed diagnostic: ", fileName, ":", ln, ":", col, " - ", msg);
     }
     return result;
 }
@@ -165,7 +202,7 @@ Diagnostic[] runCompilerOn(string uri, string text)
     Diagnostic[] diags;
     try
     {
-        auto result = execute(["axc", path]);
+        auto result = execute(["axe", path, "--syntax-check"]);
         debugLog("Compiler output: ", result.output);
         diags ~= parseDiagnostics(result.output);
         debugLog("Parsed ", diags.length, " diagnostics");
@@ -350,7 +387,7 @@ void handleInitialize(LspRequest req)
     {
         string response = `{"jsonrpc":"2.0","id":` ~ req.id.toString() ~
             `,"result":{"capabilities":` ~
-            `{"textDocumentSync":1,"hoverProvider":true,"definitionProvider":true,` ~
+            `{"textDocumentSync":{"openClose":true,"change":1,"save":true},"hoverProvider":true,"definitionProvider":true,` ~
             `"completionProvider":{"triggerCharacters":["."]},"documentSymbolProvider":true}}}`;
         debugLog("Sending initialize response");
         debugLog("Response: ", response);
@@ -581,6 +618,55 @@ void handleDidClose(LspRequest req)
     }
 
     sendDiagnostics(uri, Diagnostic[].init);
+}
+
+void handleDidChangeWatchedFiles(LspRequest req)
+{
+    debugLog("Handling didChangeWatchedFiles");
+
+    auto params = req.params;
+    if (params.type != JSONType.object)
+    {
+        return;
+    }
+
+    auto pObj = params.object;
+    if (!("changes" in pObj))
+    {
+        return;
+    }
+
+    auto changes = pObj["changes"];
+    if (changes.type != JSONType.array)
+    {
+        return;
+    }
+
+    foreach (change; changes.array)
+    {
+        if (change.type != JSONType.object)
+            continue;
+
+        auto chObj = change.object;
+        if (!("uri" in chObj))
+            continue;
+
+        string uri = chObj["uri"].str;
+        debugLog("didChangeWatchedFiles: uri=", uri);
+
+        try
+        {
+            string path = uriToPath(uri);
+            string text = std.file.readText(path);
+            g_openDocs[uri] = text;
+            auto diags = runCompilerOn(uri, text);
+            sendDiagnostics(uri, diags);
+        }
+        catch (Exception e)
+        {
+            debugLog("didChangeWatchedFiles: failed to read file: ", e.msg);
+        }
+    }
 }
 
 string[] axeKeywords = [
@@ -2243,6 +2329,9 @@ void dispatch(LspRequest req)
         break;
     case "textDocument/documentSymbol":
         handleDocumentSymbol(req);
+        break;
+    case "workspace/didChangeWatchedFiles":
+        handleDidChangeWatchedFiles(req);
         break;
     default:
         debugLog("Unknown method: ", req.method);
