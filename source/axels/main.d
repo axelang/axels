@@ -186,31 +186,55 @@ Diagnostic[] parseDiagnostics(string text)
 
 Diagnostic[] runCompilerOn(string uri, string text)
 {
+    import std.path : baseName, buildPath;
+    import std.file : tempDir, remove;
+
     string path = uriToPath(uri);
     debugLog("Running compiler on: ", path);
 
+    string tempPath = buildPath(tempDir(), "axe_lint_" ~ baseName(path));
+    tempPath = tempPath.tr(`\`, `/`);
+    debugLog("Using temp file: ", tempPath);
+
     try
     {
-        std.file.write(path, text);
+        std.file.write(tempPath, text);
     }
     catch (Exception e)
     {
-        debugLog("Failed to write file: ", e.msg);
+        debugLog("Failed to write temp file: ", e.msg);
         return Diagnostic[].init;
     }
 
     Diagnostic[] diags;
     try
     {
-        auto result = execute(["axe", path, "--syntax-check"]);
+        auto result = execute(["axe", tempPath, "--syntax-check"]);
         debugLog("Compiler output: ", result.output);
-        diags ~= parseDiagnostics(result.output);
+        auto rawDiags = parseDiagnostics(result.output);
+        foreach (ref d; rawDiags)
+        {
+            if (d.fileName.canFind("axe_lint_"))
+            {
+                d.fileName = path;
+            }
+        }
+        diags ~= rawDiags;
         debugLog("Parsed ", diags.length, " diagnostics");
     }
     catch (Exception e)
     {
         debugLog("Compiler execution failed: ", e.msg);
     }
+
+    try
+    {
+        remove(tempPath);
+    }
+    catch (Exception)
+    {
+    }
+
     return diags;
 }
 
