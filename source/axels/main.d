@@ -115,10 +115,12 @@ Diagnostic[] parseDiagnostics(string text)
             continue;
         }
 
-        if (trimmed.startsWith("error: "))
+        if (!trimmed.startsWith("error: "))
         {
-            trimmed = trimmed[7 .. $];
+            continue;
         }
+
+        trimmed = trimmed[7 .. $];
 
         string prefix = "";
         if (trimmed.length > 2 && trimmed[1] == ':')
