@@ -2091,6 +2091,11 @@ bool findDefinitionInText(string text, string word, out size_t foundLine, out si
         auto t = ln.strip();
         if (t.startsWith(pat1) || t.startsWith(pat2))
         {
+            size_t patLen = t.startsWith(pat2) ? pat2.length : pat1.length;
+            if (patLen < t.length && wordChars.canFind(t[patLen]))
+            {
+                continue;
+            }
             auto pos = ln.indexOf("def");
             if (pos < 0)
                 pos = 0;
@@ -2100,6 +2105,11 @@ bool findDefinitionInText(string text, string word, out size_t foundLine, out si
         }
         if (t.startsWith(pat3) || t.startsWith(pat4))
         {
+            size_t patLen = t.startsWith(pat4) ? pat4.length : pat3.length;
+            if (patLen < t.length && wordChars.canFind(t[patLen]))
+            {
+                continue;
+            }
             auto pos = ln.indexOf("model");
             if (pos < 0)
                 pos = 0;
@@ -2109,6 +2119,11 @@ bool findDefinitionInText(string text, string word, out size_t foundLine, out si
         }
         if (t.startsWith(pat5) || t.startsWith(pat6))
         {
+            size_t patLen = t.startsWith(pat6) ? pat6.length : pat5.length;
+            if (patLen < t.length && wordChars.canFind(t[patLen]))
+            {
+                continue;
+            }
             auto pos = ln.indexOf("enum");
             if (pos < 0)
                 pos = 0;
