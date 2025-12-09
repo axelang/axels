@@ -848,7 +848,8 @@ enum SymbolKind
     Builtin,
     Model,
     Property,
-    Enum
+    Enum,
+    Literal
 }
 
 struct SymbolInfo
@@ -2032,6 +2033,12 @@ SymbolInfo analyzeSymbol(string word, string fullText, size_t line0, size_t char
         }
     }
 
+    if (word.length > 0 && word[0] >= '0' && word[0] <= '9')
+    {
+        info.kind = SymbolKind.Literal;
+        return info;
+    }
+
     info.kind = SymbolKind.Variable;
     return info;
 }
@@ -2258,6 +2265,8 @@ string getHoverText(SymbolInfo info)
             }
             return header ~ "Enum definition";
         }
+    case SymbolKind.Literal:
+        return "**`" ~ info.name ~ "`** *(literal)*\n\nNumeric literal";
     case SymbolKind.Unknown:
         return "**`" ~ info.name ~ "`** *(symbol)*\n\nSymbol in Axe code";
     }
