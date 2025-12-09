@@ -751,6 +751,24 @@ struct ModelMethod
     bool isStatic;
 }
 
+/// Represents a function parameter
+struct FunctionParam
+{
+    string name;
+    string type;
+    string doc;
+}
+
+/// Represents a function definition
+struct FunctionDef
+{
+    string name;
+    FunctionParam[] params;
+    string returnType;
+    string doc;
+    string signature;
+}
+
 /// Represents a parsed model definition
 struct ModelDef
 {
@@ -762,6 +780,114 @@ struct ModelDef
 
 /// Global cache of parsed models
 __gshared ModelDef[string] g_modelCache;
+__gshared FunctionDef[string] g_functionCache;
+__gshared bool[string] g_parsedFiles;
+__gshared FunctionDef[] g_cFunctions = [
+    FunctionDef("memcpy", [FunctionParam("dest", "void*", "Destination buffer"), FunctionParam("src", "void*", "Source buffer"), FunctionParam("n", "size_t", "Number of bytes")], "void*", "Copy memory area", "void* memcpy(void* dest, const void* src, size_t n)"),
+    FunctionDef("memset", [FunctionParam("s", "void*", "Memory area"), FunctionParam("c", "int", "Fill byte"), FunctionParam("n", "size_t", "Number of bytes")], "void*", "Fill memory with constant byte", "void* memset(void* s, int c, size_t n)"),
+    FunctionDef("malloc", [FunctionParam("size", "size_t", "Size in bytes")], "void*", "Allocate memory", "void* malloc(size_t size)"),
+    FunctionDef("free", [FunctionParam("ptr", "void*", "Pointer to free")], "void", "Free allocated memory", "void free(void* ptr)"),
+    FunctionDef("strlen", [FunctionParam("s", "char*", "String")], "size_t", "Calculate string length", "size_t strlen(const char* s)"),
+    FunctionDef("strcmp", [FunctionParam("s1", "char*", "First string"), FunctionParam("s2", "char*", "Second string")], "int", "Compare strings", "int strcmp(const char* s1, const char* s2)"),
+    FunctionDef("strncmp", [FunctionParam("s1", "char*", "First string"), FunctionParam("s2", "char*", "Second string"), FunctionParam("n", "size_t", "Max characters")], "int", "Compare strings up to n characters", "int strncmp(const char* s1, const char* s2, size_t n)"),
+    FunctionDef("strcpy", [FunctionParam("dest", "char*", "Destination"), FunctionParam("src", "char*", "Source")], "char*", "Copy string", "char* strcpy(char* dest, const char* src)"),
+    FunctionDef("strncpy", [FunctionParam("dest", "char*", "Destination"), FunctionParam("src", "char*", "Source"), FunctionParam("n", "size_t", "Max characters")], "char*", "Copy up to n characters", "char* strncpy(char* dest, const char* src, size_t n)"),
+    FunctionDef("printf", [FunctionParam("format", "char*", "Format string")], "int", "Print formatted output", "int printf(const char* format, ...)"),
+    FunctionDef("sprintf", [FunctionParam("str", "char*", "Buffer"), FunctionParam("format", "char*", "Format string")], "int", "Print to string", "int sprintf(char* str, const char* format, ...)"),
+    FunctionDef("sizeof", [FunctionParam("type", "type", "Type or variable")], "size_t", "Get size of type", "size_t sizeof(type)"),
+    FunctionDef("exit", [FunctionParam("status", "int", "Exit code")], "void", "Terminate program", "void exit(int status)")
+];
+
+/// Parses function definitions from text and populates the function cache
+void parseFunctionsFromText(string text, string fileId = "")
+{
+    if (fileId.length > 0 && (fileId in g_parsedFiles))
+    {
+        return;
+    }
+    
+    auto lines = text.splitLines();
+    
+    for (size_t i = 0; i < lines.length; i++)
+    {
+        auto line = lines[i].strip();
+        
+        bool isPub = line.startsWith("pub def ");
+        bool isDef = isPub || line.startsWith("def ");
+        
+        if (isDef)
+        {
+            FunctionDef func;
+            
+            size_t nameStart = isPub ? 8 : 4; // "pub def " or "def "
+            string signature = line[nameStart .. $];
+            
+            size_t parenPos = signature.indexOf('(');
+            if (parenPos == -1) continue;
+            
+            func.name = signature[0 .. parenPos].strip();
+            
+            size_t endParen = signature.indexOf(')', parenPos);
+            if (endParen == -1) continue;
+            
+            string paramStr = signature[parenPos + 1 .. endParen];
+            if (paramStr.strip().length > 0)
+            {
+                auto paramParts = paramStr.split(",");
+                foreach (paramPart; paramParts)
+                {
+                    auto colonPos = paramPart.indexOf(':');
+                    if (colonPos != -1)
+                    {
+                        FunctionParam param;
+                        param.name = paramPart[0 .. colonPos].strip();
+                        param.type = paramPart[colonPos + 1 .. $].strip();
+                        func.params ~= param;
+                    }
+                }
+            }
+            
+            size_t colonPos = signature.indexOf(':', endParen);
+            if (colonPos != -1)
+            {
+                size_t bracePos = signature.indexOf('{', colonPos);
+                if (bracePos != -1)
+                {
+                    func.returnType = signature[colonPos + 1 .. bracePos].strip();
+                }
+                else
+                {
+                    func.returnType = signature[colonPos + 1 .. $].strip();
+                }
+            }
+            else
+            {
+                func.returnType = "void";
+            }
+            
+            func.signature = "def " ~ func.name ~ "(";
+            for (size_t j = 0; j < func.params.length; j++)
+            {
+                if (j > 0) func.signature ~= ", ";
+                func.signature ~= func.params[j].name ~ ": " ~ func.params[j].type;
+            }
+            func.signature ~= ")";
+            if (func.returnType != "void")
+            {
+                func.signature ~= ": " ~ func.returnType;
+            }
+            
+            func.doc = getDocStringAboveLine(lines, i);
+            
+            g_functionCache[func.name] = func;
+        }
+    }
+    
+    if (fileId.length > 0)
+    {
+        g_parsedFiles[fileId] = true;
+    }
+}
 
 /// Parses all models from text and returns them
 ModelDef[] parseModelsFromText(string text)
@@ -1248,6 +1374,8 @@ SymbolInfo analyzeSymbol(string word, string fullText, size_t line0, size_t char
     SymbolInfo info;
     info.name = word;
     info.kind = SymbolKind.Unknown;
+    
+    parseFunctionsFromText(fullText, currentUri);
 
     foreach (kw; axeKeywords)
     {
@@ -1342,6 +1470,7 @@ SymbolInfo analyzeSymbol(string word, string fullText, size_t line0, size_t char
                         {
                             auto defLines = defText.splitLines();
                             info.doc = getDocStringAboveLine(defLines, outLine);
+                            parseFunctionsFromText(defText, defUri);
                             found = true;
                         }
                     }
@@ -1574,9 +1703,30 @@ string getHoverText(SymbolInfo info)
             {
                 header = info.doc ~ "\n\n";
             }
+            
+            string signature = "";
+            if (info.name in g_functionCache)
+            {
+                auto func = g_functionCache[info.name];
+                signature = func.signature;
+                if (func.doc.length > 0 && header.length == 0)
+                {
+                    header = func.doc ~ "\n\n";
+                }
+            }
+            
             if (info.context == "function definition")
             {
+                if (signature.length > 0)
+                {
+                    return header ~ "**`" ~ signature ~ "`** *(function)*\n\nFunction definition";
+                }
                 return header ~ "**`def " ~ info.name ~ "`** *(function)*\n\nFunction definition";
+            }
+            
+            if (signature.length > 0)
+            {
+                return header ~ "**`" ~ signature ~ "`** *(function)*\n\nFunction call";
             }
             return header ~ "**`" ~ info.name ~ "()`** *(function)*\n\nFunction call";
         }
@@ -1748,6 +1898,49 @@ void handleCompletion(LspRequest req)
     if (isDotCompletion && wordBeforeDot.length > 0)
     {
         debugLog("completion: handling dot completion for '", wordBeforeDot, "'");
+        
+        if (wordBeforeDot == "C")
+        {
+            debugLog("completion: providing C function completions");
+            foreach (func; g_cFunctions)
+            {
+                if (func.name !in seen)
+                {
+                    JSONValue item;
+                    item["label"] = func.name;
+                    item["kind"] = 3L;
+                    item["detail"] = func.signature;
+                    if (func.doc.length > 0)
+                    {
+                        JSONValue docVal;
+                        docVal["kind"] = "markdown";
+                        docVal["value"] = "**`" ~ func.signature ~ "`**\n\n" ~ func.doc;
+                        item["documentation"] = docVal;
+                    }
+                    
+                    string insertText = func.name ~ "(";
+                    if (func.params.length > 0)
+                    {
+                        for (size_t i = 0; i < func.params.length; i++)
+                        {
+                            if (i > 0) insertText ~= ", ";
+                            insertText ~= "${" ~ to!string(i + 1) ~ ":" ~ func.params[i].name ~ "}";
+                        }
+                    }
+                    insertText ~= ")";
+                    
+                    item["insertText"] = insertText;
+                    item["insertTextFormat"] = 2L;
+                    items ~= item;
+                    seen[func.name] = true;
+                }
+            }
+            
+            JSONValue response;
+            response["items"] = items;
+            sendResponse(req.id, response);
+            return;
+        }
 
         ModelDef[] allModels;
 
