@@ -104,6 +104,78 @@ string extractWordAt(string text, size_t line0, size_t char0)
     return line[start .. end];
 }
 
+FunctionCallInfo findFunctionCall(string text, size_t line0, size_t char0)
+{
+    FunctionCallInfo result;
+    result.activeParameter = 0;
+    result.openParenPos = -1;
+    
+    auto lines = text.splitLines();
+    if (line0 >= lines.length)
+        return result;
+    
+    size_t pos = 0;
+    for (size_t i = 0; i < line0; i++)
+    {
+        if (i < lines.length)
+            pos += lines[i].length + 1; // +1 for newline
+    }
+    pos += char0;
+    
+    if (pos >= text.length)
+        return result;
+    
+    int parenDepth = 0;
+    int commaCount = 0;
+    size_t searchPos = pos;
+    
+    while (searchPos > 0)
+    {
+        char ch = text[searchPos];
+        
+        if (ch == ')')
+        {
+            parenDepth++;
+        }
+        else if (ch == '(')
+        {
+            if (parenDepth == 0)
+            {
+                result.openParenPos = cast(int)searchPos;
+                
+                size_t nameEnd = searchPos;
+                while (nameEnd > 0 && (text[nameEnd - 1] == ' ' || text[nameEnd - 1] == '\t'))
+                {
+                    nameEnd--; // Skip whitespace
+                }
+                
+                size_t nameStart = nameEnd;
+                while (nameStart > 0 && wordChars.canFind(text[nameStart - 1]))
+                {
+                    nameStart--;
+                }
+                
+                if (nameStart < nameEnd)
+                {
+                    result.functionName = text[nameStart .. nameEnd];
+                    result.activeParameter = commaCount;
+                    return result;
+                }
+                break;
+            }
+            parenDepth--;
+        }
+        else if (ch == ',' && parenDepth == 0)
+        {
+            commaCount++;
+        }
+        
+        searchPos--;
+    }
+    
+    return result;
+}
+
 Diagnostic[] parseDiagnostics(string text)
 {
     Diagnostic[] result;
@@ -414,7 +486,9 @@ void handleInitialize(LspRequest req)
         string response = `{"jsonrpc":"2.0","id":` ~ req.id.toString() ~
             `,"result":{"capabilities":` ~
             `{"textDocumentSync":{"openClose":true,"change":1,"save":true},"hoverProvider":true,"definitionProvider":true,` ~
-            `"completionProvider":{"triggerCharacters":["."]},"documentSymbolProvider":true}}}`;
+            `"completionProvider":{"triggerCharacters":["."]},` ~
+            `"documentSymbolProvider":true,` ~
+            `"signatureHelpProvider":{"triggerCharacters":["(",","]}}}}`;
         debugLog("Sending initialize response");
         debugLog("Response: ", response);
         writeMessage(response);
@@ -776,6 +850,14 @@ struct ModelDef
     ModelField[] fields;
     ModelMethod[] methods;
     string doc;
+}
+
+/// Represents information about a function call context
+struct FunctionCallInfo
+{
+    string functionName;
+    int activeParameter;
+    int openParenPos;
 }
 
 /// Global cache of parsed models
@@ -2146,6 +2228,125 @@ void handleCompletion(LspRequest req)
     sendResponse(req.id, result);
 }
 
+void handleSignatureHelp(LspRequest req)
+{
+    debugLog("*** SIGNATURE HELP REQUEST RECEIVED ***");
+    stderr.writeln("[INFO] SignatureHelp request received");
+    stderr.flush();
+
+    auto params = req.params;
+    if (params.type != JSONType.object)
+    {
+        debugLog("signatureHelp: params not an object");
+        JSONValue empty;
+        sendResponse(req.id, empty);
+        return;
+    }
+
+    auto pObj = params.object;
+    if (!("textDocument" in pObj) || !("position" in pObj))
+    {
+        debugLog("signatureHelp: missing textDocument or position");
+        JSONValue empty;
+        sendResponse(req.id, empty);
+        return;
+    }
+
+    auto td = pObj["textDocument"].object;
+    string uri = td["uri"].str;
+    auto pos = pObj["position"].object;
+    size_t line0 = cast(size_t) pos["line"].integer;
+    size_t char0 = cast(size_t) pos["character"].integer;
+
+    debugLog("signatureHelp: uri=", uri, ", line=", line0, ", char=", char0);
+
+    auto it = uri in g_openDocs;
+    if (it is null)
+    {
+        debugLog("signatureHelp: document not found in g_openDocs");
+        JSONValue empty;
+        sendResponse(req.id, empty);
+        return;
+    }
+
+    string text = *it;
+    
+    auto callInfo = findFunctionCall(text, line0, char0);
+    if (callInfo.functionName.length == 0)
+    {
+        debugLog("signatureHelp: no function call found");
+        JSONValue empty;
+        sendResponse(req.id, empty);
+        return;
+    }
+
+    debugLog("signatureHelp: found function call: ", callInfo.functionName);
+    
+    parseFunctionsFromText(text, uri);
+    
+    FunctionDef* funcDef = callInfo.functionName in g_functionCache;
+    if (funcDef is null)
+    {
+        string defUri;
+        size_t defLine, defChar;
+        if (findDefinitionAcrossFiles(uri, callInfo.functionName, defUri, defLine, defChar))
+        {
+            string defPath = uriToPath(defUri);
+            if (exists(defPath))
+            {
+                string defContent = readText(defPath);
+                parseFunctionsFromText(defContent, defUri);
+                funcDef = callInfo.functionName in g_functionCache;
+            }
+        }
+    }
+    
+    if (funcDef is null)
+    {
+        debugLog("signatureHelp: function definition not found");
+        JSONValue empty;
+        sendResponse(req.id, empty);
+        return;
+    }
+
+    JSONValue signature;
+    signature["label"] = funcDef.signature;
+    
+    if (funcDef.doc.length > 0)
+    {
+        JSONValue sigDoc;
+        sigDoc["kind"] = "markdown";
+        sigDoc["value"] = funcDef.doc;
+        signature["documentation"] = sigDoc;
+    }
+
+    JSONValue[] parameters;
+    foreach (param; funcDef.params)
+    {
+        JSONValue paramInfo;
+        paramInfo["label"] = param.name ~ ": " ~ param.type;
+        if (param.doc.length > 0)
+        {
+            JSONValue paramDoc;
+            paramDoc["kind"] = "markdown";
+            paramDoc["value"] = param.doc;
+            paramInfo["documentation"] = paramDoc;
+        }
+        parameters ~= paramInfo;
+    }
+    signature["parameters"] = JSONValue(parameters);
+
+    JSONValue[] signatures = [signature];
+    
+    JSONValue result;
+    result["signatures"] = JSONValue(signatures);
+    result["activeSignature"] = 0;
+    result["activeParameter"] = callInfo.activeParameter;
+
+    sendResponse(req.id, result);
+    debugLog("signatureHelp: response sent");
+}
+
 /// Handle documentSymbol request
 void handleDocumentSymbol(LspRequest req)
 {
@@ -2640,6 +2841,9 @@ void dispatch(LspRequest req)
         break;
     case "textDocument/completion":
         handleCompletion(req);
+        break;
+    case "textDocument/signatureHelp":
+        handleSignatureHelp(req);
         break;
     case "textDocument/documentSymbol":
         handleDocumentSymbol(req);
