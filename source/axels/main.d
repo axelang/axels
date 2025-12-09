@@ -1366,6 +1366,22 @@ SymbolInfo analyzeSymbol(string word, string fullText, size_t line0, size_t char
         {
             info.kind = SymbolKind.Model;
             info.context = "model definition";
+            info.doc = getDocStringAboveLine(lines, line0);
+            
+            ModelDef[] allModels = getModelsForDocument(currentUri, fullText);
+            foreach (model; allModels)
+            {
+                if (model.name == word)
+                {
+                    string detailedInfo = formatModelInfo(model);
+                    if (detailedInfo.length > 0)
+                    {
+                        info.doc = detailedInfo;
+                    }
+                    break;
+                }
+            }
+            
             return info;
         }
 
@@ -1394,12 +1410,69 @@ SymbolInfo analyzeSymbol(string word, string fullText, size_t line0, size_t char
         {
             info.kind = SymbolKind.Model;
             info.context = "type-like";
+            
+            ModelDef[] allModels;
+            allModels ~= getModelsForDocument(currentUri, fullText);
+            allModels ~= loadStdLibModels();
+            allModels ~= loadProjectModels(uriToPath(currentUri));
+            
+            foreach (model; allModels)
+            {
+                if (model.name == word)
+                {
+                    info.doc = formatModelInfo(model);
+                    break;
+                }
+            }
+            
             return info;
         }
     }
 
     info.kind = SymbolKind.Variable;
     return info;
+}
+
+string formatModelInfo(ModelDef model)
+{
+    string result = "";
+    
+    if (model.doc.length > 0)
+    {
+        result ~= model.doc ~ "\n\n";
+    }
+    
+    if (model.fields.length > 0)
+    {
+        result ~= "**Fields:**\n";
+        foreach (field; model.fields)
+        {
+            result ~= "- `" ~ field.name ~ ": " ~ field.type ~ "`";
+            if (field.doc.length > 0)
+            {
+                result ~= " - " ~ field.doc;
+            }
+            result ~= "\n";
+        }
+        result ~= "\n";
+    }
+    
+    if (model.methods.length > 0)
+    {
+        result ~= "**Methods:**\n";
+        foreach (method; model.methods)
+        {
+            string prefix = method.isStatic ? "static " : "";
+            result ~= "- `" ~ prefix ~ method.name ~ method.signature ~ "`";
+            if (method.doc.length > 0)
+            {
+                result ~= " - " ~ method.doc;
+            }
+            result ~= "\n";
+        }
+    }
+    
+    return result;
 }
 
 string getDocStringAboveLine(string[] lines, size_t defLine)
@@ -1516,7 +1589,14 @@ string getHoverText(SymbolInfo info)
     case SymbolKind.Builtin:
         return "**`" ~ info.name ~ "`** *(builtin)*\n\nBuilt-in function or type";
     case SymbolKind.Model:
-        return "**`model " ~ info.name ~ "`** *(model)*\n\nModel definition or reference";
+        {
+            string header = "**`model " ~ info.name ~ "`** *(model)*\n\n";
+            if (info.doc.length > 0)
+            {
+                return header ~ info.doc;
+            }
+            return header ~ "Model definition or reference";
+        }
     case SymbolKind.Property:
         return "**`" ~ info.name ~ "`** *(property)*\n\nProperty or method access";
     case SymbolKind.Unknown:
