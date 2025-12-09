@@ -535,7 +535,7 @@ void handleInitialize(LspRequest req)
     {
         string response = `{"jsonrpc":"2.0","id":` ~ req.id.toString() ~
             `,"result":{"capabilities":` ~
-            `{"textDocumentSync":{"openClose":true,"change":1,"save":true},"hoverProvider":true,"definitionProvider":true,` ~
+            `{"textDocumentSync":{"openClose":true,"change":1,"save":true},"hoverProvider":true,"definitionProvider":true,"renameProvider":true,` ~
             `"completionProvider":{"triggerCharacters":[".","["]},` ~
             `"documentSymbolProvider":true,` ~
             `"signatureHelpProvider":{"triggerCharacters":["(",","]}}}}`;
@@ -2343,6 +2343,202 @@ void handleHover(LspRequest req)
     debugLog("hover: response sent");
 }
 
+void addEditsForText(ref JSONValue[string] editsMap, string uri, string text, string oldName, string newName)
+{
+    if (oldName.length == 0)
+        return;
+
+    auto lines = text.splitLines();
+    JSONValue[] arr;
+    for (size_t ln = 0; ln < lines.length; ++ln)
+    {
+        string line = lines[ln];
+        size_t start = 0;
+        while (true)
+        {
+            auto idx = line.indexOf(oldName, start);
+            if (idx < 0)
+                break;
+
+            bool leftOk = (idx == 0) || !wordChars.canFind(line[idx - 1]);
+            size_t after = cast(size_t) idx + oldName.length;
+            bool rightOk = (after >= line.length) || !wordChars.canFind(line[after]);
+
+            if (leftOk && rightOk)
+            {
+                JSONValue edit;
+                JSONValue range;
+                JSONValue sPos;
+                JSONValue ePos;
+                sPos["line"] = cast(long) ln;
+                sPos["character"] = cast(long) idx;
+                ePos["line"] = cast(long) ln;
+                ePos["character"] = cast(long) after;
+                range["start"] = sPos;
+                range["end"] = ePos;
+                edit["range"] = range;
+                edit["newText"] = newName;
+                arr ~= edit;
+            }
+
+            start = cast(size_t) idx + 1;
+        }
+    }
+    
+    import std.array;
+
+    if (arr.array.length > 0)
+    {
+        editsMap[uri] = arr;
+    }
+}
+
+void handleRename(LspRequest req)
+{
+    debugLog("Handling rename request");
+
+    auto params = req.params;
+    if (params.type != JSONType.object)
+    {
+        debugLog("rename: params not an object");
+        JSONValue empty;
+        sendResponse(req.id, empty);
+        return;
+    }
+
+    auto pObj = params.object;
+    if (!("textDocument" in pObj) || !("position" in pObj) || !("newName" in pObj))
+    {
+        debugLog("rename: missing textDocument, position, or newName");
+        JSONValue empty;
+        sendResponse(req.id, empty);
+        return;
+    }
+
+    string uri = pObj["textDocument"].object["uri"].str;
+    auto pos = pObj["position"].object;
+    size_t line0 = cast(size_t) pos["line"].integer;
+    size_t char0 = cast(size_t) pos["character"].integer;
+    string newName = pObj["newName"].str;
+
+    debugLog("rename: uri=", uri, ", line=", line0, ", char=", char0, ", newName=", newName);
+
+    auto it = uri in g_openDocs;
+    string baseText;
+    if (it is null)
+    {
+        try
+        {
+            baseText = readText(uriToPath(uri));
+        }
+        catch (Exception)
+        {
+            debugLog("rename: document not found and cannot read from disk: ", uri);
+            JSONValue empty;
+            sendResponse(req.id, empty);
+            return;
+        }
+    }
+    else
+    {
+        baseText = *it;
+    }
+
+    if (positionInStringOrComment(baseText, line0, char0))
+    {
+        JSONValue empty;
+        sendResponse(req.id, empty);
+        return;
+    }
+
+    string oldName = extractWordAt(baseText, line0, char0);
+    if (oldName.length == 0)
+    {
+        JSONValue empty;
+        sendResponse(req.id, empty);
+        return;
+    }
+
+    JSONValue[string] editsMap;
+
+    foreach (docUri, docText; g_openDocs)
+    {
+        addEditsForText(editsMap, docUri, docText, oldName, newName);
+    }
+
+    string[] searchDirs = getSearchDirectories(uriToPath(uri));
+    import std.file : dirEntries;
+    import std.file : SpanMode;
+
+    foreach (dir; searchDirs)
+    {
+        try
+        {
+            foreach (dirEntry; dirEntries(dir, SpanMode.depth))
+            {
+                if (!dirEntry.isFile)
+                    continue;
+                auto ext = dirEntry.name.split('.');
+                if (ext.length == 0)
+                    continue;
+                auto fileExt = "." ~ ext[$ - 1];
+                if (fileExt != ".axe" && fileExt != ".axec")
+                    continue;
+
+                string fileUri = dirEntry.name;
+                version (Windows)
+                {
+                    import std.array : replace;
+                    fileUri = fileUri.replace("\\", "/");
+                }
+                if (!fileUri.startsWith("file://"))
+                {
+                    if (!fileUri.startsWith("/"))
+                        fileUri = "/" ~ fileUri;
+                    fileUri = "file://" ~ fileUri;
+                }
+
+                if (fileUri in g_openDocs)
+                    continue;
+
+                string fileText;
+                try
+                {
+                    fileText = readText(dirEntry.name);
+                }
+                catch (Exception)
+                {
+                    continue;
+                }
+
+                addEditsForText(editsMap, fileUri, fileText, oldName, newName);
+            }
+        }
+        catch (Exception)
+        {
+            continue;
+        }
+    }
+
+    JSONValue changesObj;
+    foreach (k, v; editsMap)
+    {
+        changesObj[k] = v;
+    }
+
+    if (changesObj.type == JSONType.object && changesObj.object.length == 0)
+    {
+        JSONValue empty;
+        sendResponse(req.id, empty);
+        return;
+    }
+
+    JSONValue result;
+    result["changes"] = changesObj;
+    sendResponse(req.id, result);
+    debugLog("rename: sent workspace edits for ", oldName, " -> ", newName);
+}
+
 void handleCompletion(LspRequest req)
 {
     debugLog("Handling completion request");
@@ -3428,6 +3624,9 @@ void dispatch(LspRequest req)
         break;
     case "textDocument/documentSymbol":
         handleDocumentSymbol(req);
+        break;
+    case "textDocument/rename":
+        handleRename(req);
         break;
     case "workspace/didChangeWatchedFiles":
         handleDidChangeWatchedFiles(req);
