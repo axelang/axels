@@ -536,7 +536,7 @@ void handleInitialize(LspRequest req)
         string response = `{"jsonrpc":"2.0","id":` ~ req.id.toString() ~
             `,"result":{"capabilities":` ~
             `{"textDocumentSync":{"openClose":true,"change":1,"save":true},"hoverProvider":true,"definitionProvider":true,` ~
-            `"completionProvider":{"triggerCharacters":["."]},` ~
+            `"completionProvider":{"triggerCharacters":[".","["]},` ~
             `"documentSymbolProvider":true,` ~
             `"signatureHelpProvider":{"triggerCharacters":["(",","]}}}}`;
         debugLog("Sending initialize response");
@@ -2653,6 +2653,25 @@ void handleCompletion(LspRequest req)
         result["isIncomplete"] = false;
         result["items"] = JSONValue(items);
         sendResponse(req.id, result);
+        return;
+    }
+
+    if (line0 < lines.length && char0 > 0 && lines[line0][char0 - 1] == '[')
+    {
+        debugLog("completion: tag completion triggered");
+        string[] tags = ["inline", "hot", "cold", "noinline"];
+        foreach (tag; tags)
+        {
+            JSONValue item;
+            item["label"] = "[" ~ tag ~ "]";
+            item["kind"] = 15L;
+            item["insertText"] = tag;
+            item["detail"] = "function attribute";
+            items ~= item;
+        }
+        JSONValue response;
+        response["items"] = items;
+        sendResponse(req.id, response);
         return;
     }
 
