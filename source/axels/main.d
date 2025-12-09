@@ -109,30 +109,30 @@ FunctionCallInfo findFunctionCall(string text, size_t line0, size_t char0)
     FunctionCallInfo result;
     result.activeParameter = 0;
     result.openParenPos = -1;
-    
+
     auto lines = text.splitLines();
     if (line0 >= lines.length)
         return result;
-    
+
     size_t pos = 0;
     for (size_t i = 0; i < line0; i++)
     {
         if (i < lines.length)
-            pos += lines[i].length + 1; // +1 for newline
+            pos += lines[i].length + 1;
     }
     pos += char0;
-    
+
     if (pos >= text.length)
-        return result;
-    
+        pos = cast(int)text.length - 1;
+
     int parenDepth = 0;
     int commaCount = 0;
     size_t searchPos = pos;
-    
+
     while (searchPos > 0)
     {
         char ch = text[searchPos];
-        
+
         if (ch == ')')
         {
             parenDepth++;
@@ -142,23 +142,72 @@ FunctionCallInfo findFunctionCall(string text, size_t line0, size_t char0)
             if (parenDepth == 0)
             {
                 result.openParenPos = cast(int)searchPos;
-                
+
                 size_t nameEnd = searchPos;
+
                 while (nameEnd > 0 && (text[nameEnd - 1] == ' ' || text[nameEnd - 1] == '\t'))
                 {
-                    nameEnd--; // Skip whitespace
+                    nameEnd--;
                 }
-                
+
                 size_t nameStart = nameEnd;
-                while (nameStart > 0 && wordChars.canFind(text[nameStart - 1]))
+                while (nameStart > 0)
                 {
-                    nameStart--;
+                    char prevChar = text[nameStart - 1];
+                    if (wordChars.canFind(prevChar) || prevChar == '.')
+                    {
+                        nameStart--;
+                    }
+                    else if (prevChar == ' ' || prevChar == '\t')
+                    {
+                        nameStart--;
+                    }
+                    else
+                    {
+                        break;
+                    }
                 }
-                
-                if (nameStart < nameEnd)
+
+                string rawName = text[nameStart .. nameEnd];
+
+                if (rawName.canFind("."))
                 {
-                    result.functionName = text[nameStart .. nameEnd];
-                    result.activeParameter = commaCount;
+                    string[] parts = rawName.split(".");
+                    if (parts.length > 0)
+                    {
+                        result.functionName = parts[$ - 1].strip(); // Get the last part (method name)
+                    }
+                    else
+                    {
+                        result.functionName = rawName.strip();
+                    }
+                }
+                else
+                {
+                    result.functionName = rawName.strip();
+                }
+
+                int currentParenDepth = 0;
+                commaCount = 0;
+                for (size_t i = result.openParenPos + 1; i < pos && i < text.length; i++)
+                {
+                    if (text[i] == '(')
+                    {
+                        currentParenDepth++;
+                    }
+                    else if (text[i] == ')')
+                    {
+                        currentParenDepth--;
+                    }
+                    else if (text[i] == ',' && currentParenDepth == 0)
+                    {
+                        commaCount++;
+                    }
+                }
+                result.activeParameter = commaCount;
+
+                if (result.functionName.length > 0)
+                {
                     return result;
                 }
                 break;
@@ -169,10 +218,10 @@ FunctionCallInfo findFunctionCall(string text, size_t line0, size_t char0)
         {
             commaCount++;
         }
-        
+
         searchPos--;
     }
-    
+
     return result;
 }
 
@@ -2325,26 +2374,20 @@ void handleSignatureHelp(LspRequest req)
     {
         JSONValue paramInfo;
         paramInfo["label"] = param.name ~ ": " ~ param.type;
-        if (param.doc.length > 0)
-        {
-            JSONValue paramDoc;
-            paramDoc["kind"] = "markdown";
-            paramDoc["value"] = param.doc;
-            paramInfo["documentation"] = paramDoc;
-        }
+        paramInfo["documentation"] = param.doc.length > 0 ? param.doc : "";
         parameters ~= paramInfo;
     }
     signature["parameters"] = JSONValue(parameters);
 
     JSONValue[] signatures = [signature];
-    
+
     JSONValue result;
     result["signatures"] = JSONValue(signatures);
     result["activeSignature"] = 0;
     result["activeParameter"] = callInfo.activeParameter;
 
     sendResponse(req.id, result);
-    debugLog("signatureHelp: response sent");
+    debugLog("signatureHelp: response sent with activeParameter=", callInfo.activeParameter);
 }
 
 /// Handle documentSymbol request
