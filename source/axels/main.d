@@ -846,7 +846,8 @@ enum SymbolKind
     Variable,
     Builtin,
     Model,
-    Property
+    Property,
+    Enum
 }
 
 struct SymbolInfo
@@ -872,6 +873,21 @@ struct ModelMethod
     string signature;
     string doc;
     bool isStatic;
+}
+
+/// Represents an enum member
+struct EnumMember
+{
+    string name;
+    string doc;
+}
+
+/// Represents a parsed enum definition
+struct EnumDef
+{
+    string name;
+    EnumMember[] members;
+    string doc;
 }
 
 /// Represents a function parameter
@@ -1191,6 +1207,190 @@ ModelDef[] parseModelsFromText(string text)
     return models;
 }
 
+/// Parses all enums from text and returns them
+EnumDef[] parseEnumsFromText(string text)
+{
+    EnumDef[] enums;
+    auto lines = text.splitLines();
+
+    for (size_t i = 0; i < lines.length; i++)
+    {
+        auto line = lines[i].strip();
+
+        bool isPub = line.startsWith("pub enum ");
+        bool isEnum = isPub || line.startsWith("enum ");
+
+        if (isEnum)
+        {
+            EnumDef enumDef;
+
+            size_t nameStart = isPub ? 9 : 5;
+            auto restOfLine = line[nameStart .. $].strip();
+            size_t nameEnd = 0;
+            while (nameEnd < restOfLine.length && wordChars.canFind(restOfLine[nameEnd]))
+                nameEnd++;
+
+            if (nameEnd > 0)
+            {
+                enumDef.name = restOfLine[0 .. nameEnd];
+                restOfLine = restOfLine[nameEnd .. $].strip();
+            }
+            else
+            {
+                continue;
+            }
+
+            enumDef.doc = getDocStringAboveLine(lines, i);
+
+            size_t bracePos = restOfLine.indexOf('{');
+
+            if (bracePos == -1)
+            {
+                size_t j = i + 1;
+                while (j < lines.length && bracePos == -1)
+                {
+                    auto nextLine = lines[j].strip();
+                    bracePos = nextLine.indexOf('{');
+                    if (bracePos != -1)
+                    {
+                        restOfLine = nextLine[bracePos + 1 .. $].strip();
+                        i = j;
+                        break;
+                    }
+                    j++;
+                }
+                if (bracePos == -1) continue;
+            }
+            else
+            {
+                restOfLine = restOfLine[bracePos + 1 .. $].strip();
+            }
+
+            int braceCount = 1;
+            bool inEnum = true;
+            size_t enumLine = i;
+            string currentDoc = "";
+
+            if (restOfLine.length > 0)
+            {
+                parseEnumMembersInline(restOfLine, enumDef, currentDoc);
+            }
+
+            enumLine++;
+            while (enumLine < lines.length && inEnum && braceCount > 0)
+            {
+                auto enumLineContent = lines[enumLine];
+                foreach (ch; enumLineContent)
+                {
+                    if (ch == '{')
+                        braceCount++;
+                    else if (ch == '}')
+                        braceCount--;
+                }
+
+                if (braceCount > 0)
+                {
+                    auto trimmed = enumLineContent.strip();
+
+                    if (trimmed.startsWith("///"))
+                    {
+                        if (currentDoc.length > 0)
+                            currentDoc ~= "\n";
+                        currentDoc ~= trimmed[3 .. $].strip();
+                    }
+                    else if (!trimmed.startsWith("//") && !trimmed.startsWith("}") && trimmed.length > 0)
+                    {
+                        string lineWithoutComments = trimmed;
+                        size_t commentPos = lineWithoutComments.indexOf("//");
+                        if (commentPos != -1)
+                        {
+                            lineWithoutComments = lineWithoutComments[0 .. commentPos].strip();
+                        }
+                        if (lineWithoutComments.length > 0)
+                        {
+                            parseEnumMembersInline(lineWithoutComments, enumDef, currentDoc);
+                        }
+                    }
+                    else if (trimmed.startsWith("}"))
+                    {
+                        if (braceCount == 0) inEnum = false;
+                        break;
+                    }
+                }
+
+                if (braceCount == 0) break;
+                enumLine++;
+            }
+
+            enums ~= enumDef;
+        }
+    }
+
+    return enums;
+}
+
+/// Helper function to parse enum members from a single line
+void parseEnumMembersInline(string line, ref EnumDef enumDef, ref string currentDoc)
+{
+    string[] potentialMembers = line.split(',');
+    string pendingContent = "";
+
+    foreach (memberStr; potentialMembers)
+    {
+        memberStr = pendingContent ~ memberStr;
+        pendingContent = "";
+
+        size_t commentPos = memberStr.indexOf("//");
+        if (commentPos != -1)
+        {
+            pendingContent = memberStr[commentPos .. $].strip();
+            memberStr = memberStr[0 .. commentPos].strip();
+        }
+        else
+        {
+            memberStr = memberStr.strip();
+        }
+
+        if (memberStr.length == 0) continue;
+
+        size_t bracePos = memberStr.indexOf('}');
+        if (bracePos != -1)
+        {
+            string beforeBrace = memberStr[0 .. bracePos].strip();
+            if (beforeBrace.length > 0)
+            {
+                processSingleEnumMember(beforeBrace, enumDef, currentDoc);
+            }
+            break;
+        }
+        else
+        {
+            processSingleEnumMember(memberStr, enumDef, currentDoc);
+        }
+    }
+}
+
+/// Helper function to process a single enum member
+void processSingleEnumMember(string memberStr, ref EnumDef enumDef, ref string currentDoc)
+{
+    size_t assignmentPos = memberStr.indexOf('=');
+    string memberName = assignmentPos != -1 ? memberStr[0 .. assignmentPos].strip() : memberStr.strip();
+
+    while (memberName.length > 0 && (memberName[$ - 1] == ';' || memberName[$ - 1] == ' ' || memberName[$ - 1] == '\t'))
+    {
+        memberName = memberName[0 .. $ - 1];
+    }
+
+    if (memberName.length > 0 && wordChars.canFind(memberName[0]) && memberName != "{")
+    {
+        EnumMember member;
+        member.name = memberName;
+        member.doc = currentDoc;
+        enumDef.members ~= member;
+        currentDoc = ""; // Reset doc for next member
+    }
+}
+
 /// Gets all models from a document (caches results)
 ModelDef[] getModelsForDocument(string uri, string text)
 {
@@ -1500,6 +1700,91 @@ ModelDef[] loadProjectModels(string currentPath)
     return allModels;
 }
 
+EnumDef[] loadProjectEnums(string currentPath)
+{
+    EnumDef[] allEnums;
+    string[] searchDirs = getSearchDirectories(currentPath);
+
+    import std.file : dirEntries;
+    import std.file : SpanMode;
+
+    foreach (dir; searchDirs)
+    {
+        try
+        {
+            foreach (dirEntry; dirEntries(dir, SpanMode.depth))
+            {
+                if (!dirEntry.isFile)
+                    continue;
+                auto ext = dirEntry.name.split('.');
+                if (ext.length == 0)
+                    continue;
+                auto fileExt = "." ~ ext[$ - 1];
+                if (fileExt != ".axe" && fileExt != ".axec")
+                    continue;
+
+                string fileText;
+                try
+                {
+                    fileText = readText(dirEntry.name);
+                }
+                catch (Exception)
+                {
+                    continue;
+                }
+
+                auto enums = parseEnumsFromText(fileText);
+                allEnums ~= enums;
+            }
+        }
+        catch (Exception)
+        {
+            continue;
+        }
+    }
+    return allEnums;
+}
+
+EnumDef[] loadStdLibEnums()
+{
+    EnumDef[] enums;
+
+    string stdPath = getStdLibPath();
+    debugLog("Looking for std lib enums at: ", stdPath);
+
+    try
+    {
+        import std.file : dirEntries, SpanMode, readText, exists;
+
+        if (!exists(stdPath))
+        {
+            debugLog("Std lib path does not exist");
+            return enums;
+        }
+
+        foreach (entry; dirEntries(stdPath, "*.axec", SpanMode.shallow))
+        {
+            try
+            {
+                string content = readText(entry.name);
+                auto parsed = parseEnumsFromText(content);
+                enums ~= parsed;
+                debugLog("Loaded ", parsed.length, " enums from ", entry.name);
+            }
+            catch (Exception e)
+            {
+                debugLog("Failed to parse enums from ", entry.name, ": ", e.msg);
+            }
+        }
+    }
+    catch (Exception e)
+    {
+        debugLog("Failed to load std lib enums: ", e.msg);
+    }
+
+    return enums;
+}
+
 SymbolInfo analyzeSymbol(string word, string fullText, size_t line0, size_t char0, string currentUri)
 {
     SymbolInfo info;
@@ -1627,7 +1912,7 @@ SymbolInfo analyzeSymbol(string word, string fullText, size_t line0, size_t char
             info.kind = SymbolKind.Model;
             info.context = "model definition";
             info.doc = getDocStringAboveLine(lines, line0);
-            
+
             ModelDef[] allModels = getModelsForDocument(currentUri, fullText);
             foreach (model; allModels)
             {
@@ -1641,7 +1926,31 @@ SymbolInfo analyzeSymbol(string word, string fullText, size_t line0, size_t char
                     break;
                 }
             }
-            
+
+            return info;
+        }
+
+        auto enumPattern = "enum " ~ word;
+        if (currentLine.strip().startsWith(enumPattern))
+        {
+            info.kind = SymbolKind.Enum;
+            info.context = "enum definition";
+            info.doc = getDocStringAboveLine(lines, line0);
+
+            EnumDef[] allEnums = parseEnumsFromText(fullText);
+            foreach (enumDef; allEnums)
+            {
+                if (enumDef.name == word)
+                {
+                    string detailedInfo = formatEnumInfo(enumDef);
+                    if (detailedInfo.length > 0)
+                    {
+                        info.doc = detailedInfo;
+                    }
+                    break;
+                }
+            }
+
             return info;
         }
 
@@ -1696,12 +2005,12 @@ SymbolInfo analyzeSymbol(string word, string fullText, size_t line0, size_t char
 string formatModelInfo(ModelDef model)
 {
     string result = "";
-    
+
     if (model.doc.length > 0)
     {
         result ~= model.doc ~ "\n\n";
     }
-    
+
     if (model.fields.length > 0)
     {
         result ~= "**Fields:**\n";
@@ -1716,7 +2025,7 @@ string formatModelInfo(ModelDef model)
         }
         result ~= "\n";
     }
-    
+
     if (model.methods.length > 0)
     {
         result ~= "**Methods:**\n";
@@ -1731,7 +2040,33 @@ string formatModelInfo(ModelDef model)
             result ~= "\n";
         }
     }
-    
+
+    return result;
+}
+
+string formatEnumInfo(EnumDef enumDef)
+{
+    string result = "";
+
+    if (enumDef.doc.length > 0)
+    {
+        result ~= enumDef.doc ~ "\n\n";
+    }
+
+    if (enumDef.members.length > 0)
+    {
+        result ~= "**Members:**\n";
+        foreach (member; enumDef.members)
+        {
+            result ~= "- `" ~ member.name ~ "`";
+            if (member.doc.length > 0)
+            {
+                result ~= " - " ~ member.doc;
+            }
+            result ~= "\n";
+        }
+    }
+
     return result;
 }
 
@@ -1880,6 +2215,15 @@ string getHoverText(SymbolInfo info)
         }
     case SymbolKind.Property:
         return "**`" ~ info.name ~ "`** *(property)*\n\nProperty or method access";
+    case SymbolKind.Enum:
+        {
+            string header = "**`enum " ~ info.name ~ "`** *(enum)*\n\n";
+            if (info.doc.length > 0)
+            {
+                return header ~ info.doc;
+            }
+            return header ~ "Enum definition";
+        }
     case SymbolKind.Unknown:
         return "**`" ~ info.name ~ "`** *(symbol)*\n\nSymbol in Axe code";
     }
@@ -2170,6 +2514,75 @@ void handleCompletion(LspRequest req)
             }
         }
 
+        EnumDef[] allEnums;
+        auto docEnums = parseEnumsFromText(text);
+        allEnums ~= docEnums;
+
+        string currPathEnums = uriToPath(uri);
+        auto projectEnums = loadProjectEnums(currPathEnums);
+
+        foreach (pe; projectEnums)
+        {
+            bool found = false;
+            foreach (e; allEnums)
+            {
+                if (e.name == pe.name)
+                {
+                    found = true;
+                    break;
+                }
+            }
+            if (!found)
+                allEnums ~= pe;
+        }
+
+        auto stdEnums = loadStdLibEnums();
+        allEnums ~= stdEnums;
+
+        string targetEnumName = "";
+        foreach (enumDef; allEnums)
+        {
+            if (enumDef.name == wordBeforeDot)
+            {
+                targetEnumName = enumDef.name;
+                debugLog("completion: found enum match '", enumDef.name, "'");
+                break;
+            }
+        }
+
+        if (targetEnumName.length > 0)
+        {
+            foreach (enumDef; allEnums)
+            {
+                if (enumDef.name == targetEnumName)
+                {
+                    debugLog("completion: providing completions for enum '", enumDef.name, "'");
+
+                    foreach (member; enumDef.members)
+                    {
+                        if (member.name !in seen)
+                        {
+                            JSONValue item;
+                            item["label"] = member.name;
+                            item["kind"] = 10L; // Enum member
+                            item["detail"] = enumDef.name;
+                            if (member.doc.length > 0)
+                            {
+                                JSONValue docVal;
+                                docVal["kind"] = "markdown";
+                                docVal["value"] = member.doc;
+                                item["documentation"] = docVal;
+                            }
+                            items ~= item;
+                            seen[member.name] = true;
+                        }
+                    }
+
+                    break;
+                }
+            }
+        }
+
         debugLog("completion: dot completion returning ", items.length, " items");
 
         JSONValue result;
@@ -2264,6 +2677,30 @@ void handleCompletion(LspRequest req)
                 }
                 items ~= item;
                 seen[model.name] = true;
+            }
+        }
+    }
+
+    auto stdEnums = loadStdLibEnums();
+    foreach (enumDef; stdEnums)
+    {
+        if (prefix.length == 0 || enumDef.name.startsWith(prefix))
+        {
+            if (enumDef.name !in seen)
+            {
+                JSONValue item;
+                item["label"] = enumDef.name;
+                item["kind"] = 10L;
+                item["detail"] = "enum";
+                if (enumDef.doc.length > 0)
+                {
+                    JSONValue docVal;
+                    docVal["kind"] = "markdown";
+                    docVal["value"] = enumDef.doc;
+                    item["documentation"] = docVal;
+                }
+                items ~= item;
+                seen[enumDef.name] = true;
             }
         }
     }
