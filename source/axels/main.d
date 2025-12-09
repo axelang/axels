@@ -2667,21 +2667,30 @@ void handleCompletion(LspRequest req)
 
     if (line0 < lines.length && char0 > 0 && lines[line0][char0 - 1] == '[')
     {
-        debugLog("completion: tag completion triggered");
-        string[] tags = ["inline", "hot", "cold", "noinline"];
-        foreach (tag; tags)
+        auto line = lines[line0];
+        size_t firstNonWS = 0;
+        while (firstNonWS < line.length && (line[firstNonWS] == ' ' || line[firstNonWS] == '\t'))
         {
-            JSONValue item;
-            item["label"] = "[" ~ tag ~ "]";
-            item["kind"] = 15L;
-            item["insertText"] = tag;
-            item["detail"] = "function attribute";
-            items ~= item;
+            firstNonWS++;
         }
-        JSONValue response;
-        response["items"] = items;
-        sendResponse(req.id, response);
-        return;
+        if (char0 - 1 == firstNonWS)
+        {
+            debugLog("completion: tag completion triggered");
+            string[] tags = ["inline", "hot", "cold", "noinline"];
+            foreach (tag; tags)
+            {
+                JSONValue item;
+                item["label"] = "[" ~ tag ~ "]";
+                item["kind"] = 15L;
+                item["insertText"] = tag;
+                item["detail"] = "function attribute";
+                items ~= item;
+            }
+            JSONValue response;
+            response["items"] = items;
+            sendResponse(req.id, response);
+            return;
+        }
     }
 
     string prefix = extractWordAt(text, line0, char0);
