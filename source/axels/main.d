@@ -2384,7 +2384,7 @@ void addEditsForText(ref JSONValue[string] editsMap, string uri, string text, st
             start = cast(size_t) idx + 1;
         }
     }
-    
+
     import std.array;
 
     if (arr.array.length > 0)
@@ -2489,6 +2489,7 @@ void handleRename(LspRequest req)
                 version (Windows)
                 {
                     import std.array : replace;
+
                     fileUri = fileUri.replace("\\", "/");
                 }
                 if (!fileUri.startsWith("file://"))
@@ -3326,7 +3327,7 @@ void handleDocumentSymbol(LspRequest req)
     debugLog("documentSymbol: returned ", results.length, " symbols for ", uri);
 }
 
-/// Search for a function definition for `word` inside a single file's text
+/// Search for a function, model, enum, or variable definition for `word` inside a single file's text
 bool findDefinitionInText(string text, string word, out size_t foundLine, out size_t foundChar)
 {
     auto lines = text.splitLines();
@@ -3337,9 +3338,22 @@ bool findDefinitionInText(string text, string word, out size_t foundLine, out si
     string pat5 = "enum " ~ word;
     string pat6 = "pub enum " ~ word;
 
+    string patVal1 = "val " ~ word ~ ":";
+    string patVal2 = "val " ~ word ~ " :";
+    string patVal3 = "val " ~ word ~ " =";
+    string patVal4 = "val " ~ word ~ "=";
+    string patMut1 = "mut " ~ word ~ ":";
+    string patMut2 = "mut " ~ word ~ " :";
+    string patMut3 = "mut " ~ word ~ " =";
+    string patMut4 = "mut " ~ word ~ "=";
+
+    string patParam = word ~ ":";
+    string patParam2 = word ~ " :";
+
     foreach (idx, ln; lines)
     {
         auto t = ln.strip();
+
         if (t.startsWith(pat1) || t.startsWith(pat2))
         {
             size_t patLen = t.startsWith(pat2) ? pat2.length : pat1.length;
@@ -3354,6 +3368,7 @@ bool findDefinitionInText(string text, string word, out size_t foundLine, out si
             foundChar = cast(size_t) pos;
             return true;
         }
+
         if (t.startsWith(pat3) || t.startsWith(pat4))
         {
             size_t patLen = t.startsWith(pat4) ? pat4.length : pat3.length;
@@ -3368,6 +3383,7 @@ bool findDefinitionInText(string text, string word, out size_t foundLine, out si
             foundChar = cast(size_t) pos;
             return true;
         }
+
         if (t.startsWith(pat5) || t.startsWith(pat6))
         {
             size_t patLen = t.startsWith(pat6) ? pat6.length : pat5.length;
@@ -3381,6 +3397,48 @@ bool findDefinitionInText(string text, string word, out size_t foundLine, out si
             foundLine = idx;
             foundChar = cast(size_t) pos;
             return true;
+        }
+
+        if (ln.canFind(patVal1) || ln.canFind(patVal2) || ln.canFind(patVal3) || ln.canFind(
+                patVal4))
+        {
+            auto pos = ln.indexOf("val " ~ word);
+            if (pos >= 0)
+            {
+                foundLine = idx;
+                foundChar = cast(size_t) pos;
+                return true;
+            }
+        }
+
+        if (ln.canFind(patMut1) || ln.canFind(patMut2) || ln.canFind(patMut3) || ln.canFind(
+                patMut4))
+        {
+            auto pos = ln.indexOf("mut " ~ word);
+            if (pos >= 0)
+            {
+                foundLine = idx;
+                foundChar = cast(size_t) pos;
+                return true;
+            }
+        }
+
+        if ((ln.canFind(patParam) || ln.canFind(patParam2)) && ln.canFind("("))
+        {
+            auto parenPos = ln.indexOf("(");
+            auto paramPos = ln.indexOf(patParam);
+            if (paramPos < 0)
+                paramPos = ln.indexOf(patParam2);
+
+            if (paramPos > parenPos)
+            {
+                if (paramPos == 0 || !wordChars.canFind(ln[paramPos - 1]))
+                {
+                    foundLine = idx;
+                    foundChar = cast(size_t) paramPos;
+                    return true;
+                }
+            }
         }
     }
     return false;
