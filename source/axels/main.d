@@ -2873,7 +2873,7 @@ void handleCompletion(LspRequest req)
         if (char0 - 1 == firstNonWS)
         {
             debugLog("completion: tag completion triggered");
-            string[] tags = ["inline", "hot", "cold", "noinline"];
+            string[] tags = ["inline", "hot", "cold", "noinline", "entry"];
             foreach (tag; tags)
             {
                 JSONValue item;
